@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#3b82f6" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Energie" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icon-192.png" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <title>Energie</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--accent:#3b82f6;--accent-light:#eff6ff;--green:#16a34a;--red:#dc2626;--orange:#ea580c;--text:#1e293b;--text-dim:#94a3b8;--card:#fff;--bg:#f1f5f9;--border:#e2e8f0;--input-bg:#f8fafc;--muted:#e2e8f0}
+    body{font-family:'DM Sans','Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;overscroll-behavior:none}
+    input,select,button{font-family:inherit}
+    #root{min-height:100vh;min-height:100dvh}
+    .sync-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+    .sync-ok{background:var(--green)}.sync-err{background:var(--red)}.sync-loading{background:var(--orange);animation:pulse 1s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  </style>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+// ╔═══════════════════════════════════════════════════════════════╗
+// ║  🔥 FIREBASE — VYPLŇ SVÉ ÚDAJE (viz README.md)             ║
+// ╚═══════════════════════════════════════════════════════════════╝
+const firebaseConfig = {
+  apiKey: "AIzaSyBl983cxrNSQJrry81z9xkyvtRejGnoEeI",
+  authDomain: "energie-app-e990d.firebaseapp.com",
+  projectId: "energie-app-e990d",
+  storageBucket: "energie-app-e990d.firebasestorage.app",
+  messagingSenderId: "163468730143",
+  appId: "1:163468730143:web:0b364d6a00b4be5db61a2a",
+  measurementId: "G-5QTTT89B9G"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const DOC = db.collection("houses").doc("main");
+
+// Register SW
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+
+// ─── Helpers ───
+const {useState,useEffect,useCallback,useRef}=React;
+const MC=["Leden","Únor","Březen","Duben","Květen","Červen","Červenec","Srpen","Září","Říjen","Listopad","Prosinec"];
+const gid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const fCZK=n=>new Intl.NumberFormat("cs-CZ",{style:"currency",currency:"CZK",minimumFractionDigits:0,maximumFractionDigits:0}).format(n);
+const pk=(y,m)=>`${y}-${String(m+1).padStart(2,"0")}`;
+const pl=p=>{const[y,m]=p.split("-");return`${MC[parseInt(m,10)-1]} ${y}`};
+const allP=(s,e)=>{const r=[];let[sy,sm]=s.split("-").map(Number);const[ey,em]=e.split("-").map(Number);while(sy<ey||(sy===ey&&sm<=em)){r.push(pk(sy,sm-1));sm++;if(sm>12){sm=1;sy++}}return r};
+const getAdv=(person)=>person.monthlyAdvance||0;
+
+// ─── Styles ───
+const cs={background:"var(--card)",borderRadius:12,border:"1px solid var(--border)"};
+const bs={padding:"10px 18px",borderRadius:10,border:"none",background:"var(--accent)",color:"#fff",fontWeight:600,fontSize:14,cursor:"pointer"};
+const bsm={padding:"4px 10px",borderRadius:8,border:"1px solid var(--border)",background:"transparent",cursor:"pointer",fontSize:14,color:"var(--text-dim)"};
+const bsd={...bsm,color:"#dc2626",borderColor:"#fecaca"};
+const is={width:"100%",padding:"10px 12px",borderRadius:10,border:"1px solid var(--border)",background:"var(--input-bg)",color:"var(--text)",fontSize:14,boxSizing:"border-box"};
+const ls={display:"block",fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:4};
+const ico={"Elektřina":"⚡","Plyn":"🔥","Voda":"💧","Teplo":"🌡","Jiné":"📄"};
+
+function SC({label,value,color,sub}){
+  return <div style={{...cs,padding:"14px 10px",textAlign:"center"}}>
+    <div style={{fontSize:11,color:"var(--text-dim)",marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>{label}</div>
+    <div style={{fontSize:18,fontWeight:700,color,fontVariantNumeric:"tabular-nums"}}>{value}</div>
+    {sub&&<div style={{fontSize:11,color:"var(--text-dim)",marginTop:2}}>{sub}</div>}
+  </div>;
+}
+
+// ═══ LOGIN ═══
+function Login({people,onSelect}){
+  return <div style={{minHeight:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
+    <div style={{fontSize:48,marginBottom:16}}>⚡</div>
+    <h1 style={{fontSize:24,fontWeight:700,marginBottom:4}}>Energie</h1>
+    <p style={{color:"var(--text-dim)",marginBottom:32,fontSize:15}}>Kdo jsi?</p>
+    <div style={{display:"flex",flexDirection:"column",gap:10,width:"100%",maxWidth:320}}>
+      {people.map(p=><button key={p.id} onClick={()=>onSelect(p.id)} style={{...cs,padding:"16px 20px",display:"flex",alignItems:"center",gap:14,cursor:"pointer",border:"2px solid var(--border)",textAlign:"left"}}>
+        <div style={{width:42,height:42,borderRadius:"50%",background:p.isOwner?"var(--accent)":"var(--muted)",display:"flex",alignItems:"center",justifyContent:"center",color:p.isOwner?"#fff":"var(--text-dim)",fontWeight:700,fontSize:16,flexShrink:0}}>{p.name.charAt(0).toUpperCase()}</div>
+        <div><div style={{fontWeight:600,fontSize:15}}>{p.name}</div>
+        <div style={{fontSize:12,color:"var(--text-dim)"}}>{p.isOwner?"Majitel — správce":`Záloha ${fCZK(getAdv(p))}/měs.`}</div></div>
+      </button>)}
+    </div>
+  </div>;
+}
+
+// ═══ ROOMMATE ═══
+function Roommate({me,people,advances,setAdvances,bills,startPeriod,currentPeriod,onLogout}){
+  const[tab,setTab]=useState("overview");
+  const[amount,setAmount]=useState(String(getAdv(me)));
+  const[note,setNote]=useState("");
+  const now=new Date();
+  const[sY,setSY]=useState(now.getFullYear());
+  const[sM,setSM]=useState(now.getMonth());
+  const vp=pk(sY,sM);
+  const prev=()=>{if(sM===0){setSM(11);setSY(y=>y-1)}else setSM(m=>m-1)};
+  const next=()=>{if(sM===11){setSM(0);setSY(y=>y+1)}else setSM(m=>m+1)};
+
+  const myAdv=getAdv(me);
+  const periods=allP(startPeriod,currentPeriod);
+  const totalExp=periods.length*myAdv;
+  const myAdvances=advances.filter(a=>a.personId===me.id);
+  const totalPaid=myAdvances.reduce((s,a)=>s+a.amount,0);
+  const advDebt=totalExp-totalPaid;
+  const totalBills=bills.reduce((s,b)=>s+b.amount,0);
+  const myShare=people.length>0?totalBills/people.length:0;
+  const realBal=totalPaid-myShare;
+
+  const pAdv=myAdvances.filter(a=>a.period===vp);
+  const pPaid=pAdv.reduce((s,a)=>s+a.amount,0);
+  const pExp=periods.includes(vp)?myAdv:0;
+  const pBills=bills.filter(b=>b.period===vp);
+  const pBT=pBills.reduce((s,b)=>s+b.amount,0);
+  const pPP=people.length>0?pBT/people.length:0;
+
+  const add=()=>{
+    if(!amount||parseFloat(amount)<=0)return;
+    setAdvances([...advances,{id:gid(),personId:me.id,amount:parseFloat(amount),note,period:vp,date:new Date().toISOString().slice(0,10)}]);
+    setNote("");
+  };
+
+  const hist=[...myAdvances.map(a=>({...a,type:"adv",sd:a.date})),...bills.map(b=>({...b,type:"bill",sd:b.date}))].sort((a,b)=>b.sd.localeCompare(a.sd));
+  const hbp={};hist.forEach(i=>{if(!hbp[i.period])hbp[i.period]=[];hbp[i.period].push(i)});
+  const spk=Object.keys(hbp).sort((a,b)=>b.localeCompare(a));
+
+  const tabs=[{id:"overview",l:"Přehled",i:"◉"},{id:"pay",l:"Zaplatit",i:"↓"},{id:"history",l:"Historie",i:"☰"}];
+
+  return <div style={{minHeight:"100dvh"}}>
+    <div style={{background:"var(--card)",borderBottom:"1px solid var(--border)",padding:"12px 16px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",maxWidth:600,margin:"0 auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:32,height:32,borderRadius:"50%",background:"var(--muted)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:13,color:"var(--text-dim)"}}>{me.name.charAt(0).toUpperCase()}</div>
+          <span style={{fontWeight:600,fontSize:15}}>{me.name}</span>
+        </div>
+        {tab!=="history"&&<div style={{display:"flex",alignItems:"center",gap:8}}>
+          <button onClick={prev} style={bsm}>‹</button>
+          <span style={{fontWeight:600,fontSize:13,minWidth:110,textAlign:"center"}}>{pl(vp)}</span>
+          <button onClick={next} style={bsm}>›</button>
+        </div>}
+        <button onClick={onLogout} style={bsm}>↩</button>
+      </div>
+    </div>
+
+    <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 100px"}}>
+      {/* ── OVERVIEW ── */}
+      {tab==="overview"&&<div>
+        {advDebt>0?<div style={{background:"linear-gradient(135deg,#dc2626,#ef4444)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
+          <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>DLUŽNÉ ZÁLOHY</div>
+          <div style={{fontSize:30,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{fCZK(advDebt)}</div>
+          <div style={{fontSize:13,opacity:.8,marginTop:4}}>{periods.length} × {fCZK(myAdv)} = {fCZK(totalExp)} · zaplaceno {fCZK(totalPaid)}</div>
+        </div>:<div style={{background:"linear-gradient(135deg,#16a34a,#22c55e)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
+          <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>ZÁLOHY</div>
+          <div style={{fontSize:22,fontWeight:700}}>Vše zaplaceno ✓</div>
+          {totalPaid>totalExp&&<div style={{fontSize:13,opacity:.8,marginTop:4}}>Přeplatek: {fCZK(totalPaid-totalExp)}</div>}
+        </div>}
+
+        {totalBills>0&&<div style={{background:realBal>=0?"linear-gradient(135deg,#0d9488,#14b8a6)":"linear-gradient(135deg,#c2410c,#ea580c)",borderRadius:14,padding:"16px 18px",marginBottom:16,color:"#fff"}}>
+          <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>SKUTEČNÉ VYÚČTOVÁNÍ</div>
+          <div style={{fontSize:24,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{realBal>=0?`přeplatek ${fCZK(realBal)}`:`nedoplatek ${fCZK(Math.abs(realBal))}`}</div>
+          <div style={{fontSize:12,opacity:.8,marginTop:4}}>Podíl: {fCZK(myShare)} · Zaplaceno: {fCZK(totalPaid)}</div>
+        </div>}
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
+          <SC label="Záloha měsíc" value={fCZK(pExp)} color="var(--accent)" />
+          <SC label="Zaplaceno" value={fCZK(pPaid)} color={pPaid>=pExp&&pExp>0?"var(--green)":"var(--orange)"} />
+        </div>
+
+        {pBills.length>0?<div style={{marginBottom:16}}>
+          <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Faktury — {pl(vp)}</h3>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {pBills.map(b=><div key={b.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18}}>{ico[b.description]||"📄"}</span>
+              <span style={{flex:1,fontWeight:500,fontSize:14}}>{b.description}</span>
+              <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(b.amount)}</span>
+            </div>)}
+            <div style={{...cs,padding:"12px 16px",background:"var(--input-bg)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:600,fontSize:13}}>Celkem</span><span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(pBT)}</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Tvůj podíl (1/{people.length})</span><span style={{fontWeight:700,color:"var(--accent)"}}>{fCZK(pPP)}</span></div>
+            </div>
+          </div>
+        </div>:<div style={{...cs,padding:"20px 16px",textAlign:"center",marginBottom:16}}><span style={{color:"var(--text-dim)",fontSize:14}}>Žádné faktury za {pl(vp)}</span></div>}
+
+        {pAdv.length>0&&<div>
+          <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Moje platby — {pl(vp)}</h3>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {pAdv.map(a=><div key={a.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:"var(--green)"}} />
+              <span style={{flex:1,fontSize:13,color:"var(--text-dim)"}}>{a.date}{a.note?` · ${a.note}`:""}</span>
+              <span style={{fontWeight:700,color:"var(--green)"}}>{fCZK(a.amount)}</span>
+            </div>)}
+          </div>
+        </div>}
+      </div>}
+
+      {/* ── PAY ── */}
+      {tab==="pay"&&<div>
+        <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Zaznamenat platbu</h2>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
+          <SC label="Záloha" value={fCZK(pExp)} color="var(--accent)" />
+          <SC label="Už zaplaceno" value={fCZK(pPaid)} color={pPaid>=pExp&&pExp>0?"var(--green)":"var(--orange)"} />
+        </div>
+        <div style={{...cs,padding:16,marginBottom:20}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} style={is} /></div>
+            <div><label style={ls}>Poznámka</label><input value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="VS, datum..." style={is} /></div>
+          </div>
+          <button onClick={add} style={{...bs,width:"100%"}}>✓ Zaplatil/a jsem zálohu</button>
+        </div>
+        {pAdv.length>0&&<div>
+          <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Platby tento měsíc</h3>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {pAdv.map(a=><div key={a.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:"var(--green)"}} />
+              <span style={{flex:1,fontSize:13,color:"var(--text-dim)"}}>{a.date}{a.note?` · ${a.note}`:""}</span>
+              <span style={{fontWeight:700,color:"var(--green)"}}>{fCZK(a.amount)}</span>
+            </div>)}
+          </div>
+        </div>}
+      </div>}
+
+      {/* ── HISTORY ── */}
+      {tab==="history"&&<div>
+        <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:600}}>Historie</h2>
+        <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Všechny platby a faktury</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:20}}>
+          <SC label="Zaplaceno" value={fCZK(totalPaid)} color="var(--green)" />
+          <SC label="Podíl energií" value={fCZK(myShare)} color="var(--orange)" />
+          <SC label={realBal>=0?"Přeplatek":"Nedoplatek"} value={fCZK(Math.abs(realBal))} color={realBal>=0?"var(--green)":"var(--red)"} />
+        </div>
+        {spk.length===0?<div style={{...cs,padding:"32px 16px",textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>📭</div><p style={{color:"var(--text-dim)"}}>Zatím žádné záznamy</p></div>
+        :spk.map(k=>{
+          const items=hbp[k];const myP=items.filter(i=>i.type==="adv").reduce((s,i)=>s+i.amount,0);
+          const bP=items.filter(i=>i.type==="bill").reduce((s,i)=>s+i.amount,0);const sP=people.length>0?bP/people.length:0;
+          return <div key={k} style={{marginBottom:20}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <h3 style={{fontSize:15,fontWeight:700}}>{pl(k)}</h3>
+              {bP>0&&<span style={{fontSize:12,color:myP>=sP?"var(--green)":"var(--red)",fontWeight:600}}>{myP>=sP?`+${fCZK(myP-sP)}`:fCZK(myP-sP)}</span>}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {items.map(item=><div key={item.id} style={{...cs,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+                {item.type==="adv"?<>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:"#dcfce7",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>↑</div>
+                  <div style={{flex:1}}><div style={{fontWeight:500,fontSize:14}}>Záloha</div><div style={{fontSize:12,color:"var(--text-dim)"}}>{item.date}{item.note?` · ${item.note}`:""}</div></div>
+                  <span style={{fontWeight:700,color:"var(--green)"}}>+{fCZK(item.amount)}</span>
+                </>:<>
+                  <div style={{width:28,height:28,borderRadius:"50%",background:"#fff7ed",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{ico[item.description]||"📄"}</div>
+                  <div style={{flex:1}}><div style={{fontWeight:500,fontSize:14}}>{item.description}</div><div style={{fontSize:12,color:"var(--text-dim)"}}>{item.date} · podíl {fCZK(people.length>0?item.amount/people.length:0)}</div></div>
+                  <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(item.amount)}</span>
+                </>}
+              </div>)}
+            </div>
+          </div>;
+        })}
+      </div>}
+    </div>
+
+    <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--card)",borderTop:"1px solid var(--border)",padding:"6px 0 env(safe-area-inset-bottom, 6px)",display:"flex",justifyContent:"center",gap:4}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"6px 22px",borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",gap:2,color:tab===t.id?"var(--accent)":"var(--text-dim)",fontWeight:tab===t.id?700:500,fontSize:11}}>
+        <span style={{fontSize:18}}>{t.i}</span>{t.l}
+      </button>)}
+    </div>
+  </div>;
+}
+
+// ═══ OWNER COMPONENTS ═══
+function ODash({people,advances,bills,startPeriod,currentPeriod}){
+  const rm=people.filter(p=>!p.isOwner);
+  const periods=allP(startPeriod,currentPeriod);
+  const pB=bills.filter(b=>b.period===currentPeriod);
+  const pA=advances.filter(a=>a.period===currentPeriod);
+  const tB=pB.reduce((s,b)=>s+b.amount,0);
+  const tA=pA.reduce((s,a)=>s+a.amount,0);
+  const pp=people.length>0?tB/people.length:0;
+  const expAll=rm.reduce((s,r)=>s+getAdv(r),0);
+
+  const stats=rm.map(p=>{
+    const ma=getAdv(p);
+    const tE=periods.length*ma;
+    const tP=advances.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
+    const debt=tE-tP;
+    const thisP=pA.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
+    return{...p,ma,tE,tP,debt,thisP,ok:thisP>=ma};
+  });
+  const totalDebt=stats.reduce((s,r)=>s+Math.max(0,r.debt),0);
+
+  return <div>
+    <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>{pl(currentPeriod)}</h2>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:20}}>
+      <SC label="Faktury" value={fCZK(tB)} color="var(--orange)" />
+      <SC label="Zálohy" value={fCZK(tA)} color="var(--green)" sub={`z ${fCZK(expAll)}`} />
+      <SC label="Dluhy celk." value={fCZK(totalDebt)} color={totalDebt>0?"var(--red)":"var(--green)"} />
+    </div>
+    <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Spolubydlící</h3>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {stats.map(r=><div key={r.id} style={{...cs,padding:"14px 16px",borderLeft:`4px solid ${r.debt>0?"var(--red)":"var(--green)"}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div><span style={{fontWeight:600,fontSize:15}}>{r.name}</span><span style={{fontSize:12,color:"var(--text-dim)",marginLeft:8}}>záloha {fCZK(r.ma)}</span></div>
+          {r.debt>0?<span style={{fontWeight:700,color:"var(--red)",fontSize:15}}>dluh {fCZK(r.debt)}</span>
+          :r.debt<0?<span style={{fontWeight:700,color:"var(--green)",fontSize:14}}>+{fCZK(Math.abs(r.debt))}</span>
+          :<span style={{fontWeight:700,color:"var(--green)",fontSize:14}}>✓</span>}
+        </div>
+        <div style={{background:"var(--border)",borderRadius:6,height:8,overflow:"hidden",marginBottom:6}}>
+          <div style={{height:"100%",borderRadius:6,background:r.debt>0?"var(--red)":"var(--green)",width:`${Math.min(100,r.tE>0?(r.tP/r.tE)*100:100)}%`,transition:"width .3s"}} />
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"var(--text-dim)"}}>
+          <span>Zaplaceno: {fCZK(r.tP)}</span><span>Očekáváno: {fCZK(r.tE)}</span>
+        </div>
+        <div style={{fontSize:12,color:"var(--text-dim)",marginTop:4}}>
+          Tento měsíc: {r.ok?`✓ ${fCZK(r.thisP)}`:r.thisP>0?`⚠ ${fCZK(r.thisP)} z ${fCZK(r.ma)}`:"✗ nezaplaceno"}
+        </div>
+      </div>)}
+    </div>
+    {tB>0&&<div style={{marginTop:20}}>
+      <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Vyúčtování</h3>
+      <div style={{...cs,padding:"14px 16px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontWeight:500}}>Faktury celkem</span><span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(tB)}</span></div>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:500}}>Podíl/osoba ({people.length})</span><span style={{fontWeight:700,color:"var(--accent)"}}>{fCZK(pp)}</span></div>
+        <div style={{borderTop:"1px solid var(--border)",paddingTop:8}}>
+          {stats.map(r=>{const d=r.thisP-pp;return<div key={r.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"4px 0"}}>
+            <span>{r.name}</span><span style={{color:d>=0?"var(--green)":"var(--red)",fontWeight:600}}>{d>=0?`přeplatek ${fCZK(d)}`:`doplatit ${fCZK(Math.abs(d))}`}</span>
+          </div>})}
+        </div>
+      </div>
+    </div>}
+  </div>;
+}
+
+function OAdv({people,advances,setAdvances,currentPeriod}){
+  const rm=people.filter(p=>!p.isOwner);
+  const[pid,setPid]=useState("");
+  const selPerson=rm.find(p=>p.id===pid);
+  const[amount,setAmount]=useState("");
+  const[note,setNote]=useState("");
+  const pA=advances.filter(a=>a.period===currentPeriod);
+
+  useEffect(()=>{if(selPerson)setAmount(String(getAdv(selPerson)))},[pid]);
+
+  const add=()=>{if(!pid||!amount)return;setAdvances([...advances,{id:gid(),personId:pid,amount:parseFloat(amount),note,period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount(selPerson?String(getAdv(selPerson)):"");setNote("")};
+  const del=id=>setAdvances(advances.filter(a=>a.id!==id));
+  return <div>
+    <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Zálohy — {pl(currentPeriod)}</h2>
+    <div style={{...cs,padding:16,marginBottom:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div><label style={ls}>Od koho</label><select value={pid} onChange={e=>setPid(e.target.value)} style={is}><option value="">Vyber...</option>{rm.map(p=><option key={p.id} value={p.id}>{p.name} ({fCZK(getAdv(p))})</option>)}</select></div>
+        <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} style={is}/></div>
+      </div>
+      <div style={{marginBottom:10}}><label style={ls}>Poznámka</label><input value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="VS, pozn..." style={is}/></div>
+      <button onClick={add} style={{...bs,width:"100%"}}>+ Zaznamenat zálohu</button>
+    </div>
+    {pA.length===0?<p style={{textAlign:"center",color:"var(--text-dim)",padding:20}}>Žádné zálohy</p>:
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {pA.map(a=>{const p=people.find(x=>x.id===a.personId);return<div key={a.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:8,height:8,borderRadius:"50%",background:"var(--green)"}} />
+        <span style={{flex:1,fontWeight:500}}>{p?.name}</span>
+        {a.note&&<span style={{fontSize:12,color:"var(--text-dim)"}}>{a.note}</span>}
+        <span style={{fontWeight:700,color:"var(--green)"}}>{fCZK(a.amount)}</span>
+        <button onClick={()=>del(a.id)} style={bsd}>✕</button>
+      </div>})}
+    </div>}
+  </div>;
+}
+
+function OBills({bills,setBills,currentPeriod}){
+  const[desc,setDesc]=useState("Elektřina");
+  const[amount,setAmount]=useState("");
+  const pB=bills.filter(b=>b.period===currentPeriod);
+  const add=()=>{if(!amount)return;setBills([...bills,{id:gid(),description:desc,amount:parseFloat(amount),period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount("")};
+  const del=id=>setBills(bills.filter(b=>b.id!==id));
+  return <div>
+    <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Faktury — {pl(currentPeriod)}</h2>
+    <div style={{...cs,padding:16,marginBottom:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div><label style={ls}>Typ</label><select value={desc} onChange={e=>setDesc(e.target.value)} style={is}>{["Elektřina","Plyn","Voda","Teplo","Jiné"].map(o=><option key={o}>{o}</option>)}</select></div>
+        <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="0" style={is}/></div>
+      </div>
+      <button onClick={add} style={{...bs,width:"100%"}}>+ Přidat fakturu</button>
+    </div>
+    {pB.length===0?<p style={{textAlign:"center",color:"var(--text-dim)",padding:20}}>Žádné faktury</p>:
+    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+      {pB.map(b=><div key={b.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:18}}>{ico[b.description]||"📄"}</span>
+        <span style={{flex:1,fontWeight:500}}>{b.description}</span>
+        <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(b.amount)}</span>
+        <button onClick={()=>del(b.id)} style={bsd}>✕</button>
+      </div>)}
+    </div>}
+  </div>;
+}
+
+function OSettings({people,setPeople,startPeriod,setStartPeriod}){
+  const[editing,setEditing]=useState(null);
+  const[draft,setDraft]=useState("");
+  const[advDraft,setAdvDraft]=useState("");
+
+  const startEdit=(p)=>{setEditing(p.id);setDraft(p.name);setAdvDraft(String(getAdv(p)))};
+  const save=()=>{
+    if(draft.trim()){
+      setPeople(people.map(p=>p.id===editing?{...p,name:draft.trim(),monthlyAdvance:parseFloat(advDraft)||0}:p));
+    }
+    setEditing(null);
+  };
+  const addPerson=()=>setPeople([...people,{id:gid(),name:`Spolubydlící ${people.length}`,isOwner:false,monthlyAdvance:3000}]);
+  const delPerson=id=>{if(people.length<=2)return;setPeople(people.filter(p=>p.id!==id))};
+  const[spY,spM]=startPeriod.split("-").map(Number);
+
+  return <div>
+    <h2 style={{margin:"0 0 20px",fontSize:20,fontWeight:600}}>Nastavení</h2>
+
+    <div style={{...cs,padding:16,marginBottom:16}}>
+      <h3 style={{margin:"0 0 10px",fontSize:15,fontWeight:600}}>Sledovat od</h3>
+      <div style={{display:"flex",gap:8}}>
+        <select value={spM} onChange={e=>setStartPeriod(pk(spY,parseInt(e.target.value)-1))} style={{...is,flex:1}}>
+          {MC.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+        </select>
+        <select value={spY} onChange={e=>setStartPeriod(pk(parseInt(e.target.value),spM-1))} style={{...is,width:100}}>
+          {[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+      <p style={{fontSize:12,color:"var(--text-dim)",margin:"8px 0 0"}}>Dluhy se počítají od tohoto měsíce</p>
+    </div>
+
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      <h3 style={{margin:0,fontSize:15,fontWeight:600}}>Spolubydlící a zálohy</h3>
+      <button onClick={addPerson} style={bs}>+ Přidat</button>
+    </div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {people.map(p=><div key={p.id} style={{...cs,padding:"14px 16px"}}>
+        {editing===p.id?<div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div><label style={ls}>Jméno</label><input value={draft} onChange={e=>setDraft(e.target.value)} style={is} autoFocus /></div>
+            {!p.isOwner&&<div><label style={ls}>Záloha (Kč/měs.)</label><input type="number" value={advDraft} onChange={e=>setAdvDraft(e.target.value)} style={is} /></div>}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={save} style={{...bs,flex:1}}>Uložit</button>
+            <button onClick={()=>setEditing(null)} style={{...bsm,flex:0}}>Zrušit</button>
+          </div>
+        </div>:<div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{width:36,height:36,borderRadius:"50%",background:p.isOwner?"var(--accent)":"var(--muted)",display:"flex",alignItems:"center",justifyContent:"center",color:p.isOwner?"#fff":"var(--text-dim)",fontWeight:700,fontSize:14,flexShrink:0}}>{p.name.charAt(0).toUpperCase()}</div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:600}}>{p.name}</div>
+            {p.isOwner?<div style={{fontSize:12,color:"var(--accent)"}}>Majitel — platí faktury</div>
+            :<div style={{fontSize:13,color:"var(--text-dim)"}}>Záloha: <strong style={{color:"var(--text)"}}>{fCZK(getAdv(p))}</strong>/měs.</div>}
+          </div>
+          <button onClick={()=>startEdit(p)} style={bsm}>✎</button>
+          {!p.isOwner&&<button onClick={()=>delPerson(p.id)} style={bsd}>✕</button>}
+        </div>}
+      </div>)}
+    </div>
+  </div>;
+}
+
+// ═══ OWNER VIEW ═══
+function Owner({people,setPeople,advances,setAdvances,bills,setBills,startPeriod,setStartPeriod,onLogout}){
+  const[tab,setTab]=useState("dashboard");
+  const now=new Date();
+  const[sY,setSY]=useState(now.getFullYear());
+  const[sM,setSM]=useState(now.getMonth());
+  const cp=pk(sY,sM);
+  const prev=()=>{if(sM===0){setSM(11);setSY(y=>y-1)}else setSM(m=>m-1)};
+  const next=()=>{if(sM===11){setSM(0);setSY(y=>y+1)}else setSM(m=>m+1)};
+  const tabs=[{id:"dashboard",l:"Přehled",i:"◉"},{id:"advances",l:"Zálohy",i:"↓"},{id:"bills",l:"Faktury",i:"⚡"},{id:"settings",l:"Nastavení",i:"⚙"}];
+  return <div style={{minHeight:"100dvh"}}>
+    <div style={{background:"var(--card)",borderBottom:"1px solid var(--border)",padding:"12px 16px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",maxWidth:600,margin:"0 auto"}}>
+        <h1 style={{margin:0,fontSize:20,fontWeight:700,letterSpacing:-.5}}>⚡ Energie</h1>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <button onClick={prev} style={bsm}>‹</button>
+          <span style={{fontWeight:600,fontSize:14,minWidth:120,textAlign:"center"}}>{pl(cp)}</span>
+          <button onClick={next} style={bsm}>›</button>
+        </div>
+        <button onClick={onLogout} style={bsm}>↩</button>
+      </div>
+    </div>
+    <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 100px"}}>
+      {tab==="dashboard"&&<ODash people={people} advances={advances} bills={bills} startPeriod={startPeriod} currentPeriod={cp} />}
+      {tab==="advances"&&<OAdv people={people} advances={advances} setAdvances={setAdvances} currentPeriod={cp} />}
+      {tab==="bills"&&<OBills bills={bills} setBills={setBills} currentPeriod={cp} />}
+      {tab==="settings"&&<OSettings people={people} setPeople={setPeople} startPeriod={startPeriod} setStartPeriod={setStartPeriod} />}
+    </div>
+    <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--card)",borderTop:"1px solid var(--border)",padding:"6px 0 env(safe-area-inset-bottom, 6px)",display:"flex",justifyContent:"center",gap:4}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"6px 18px",borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",gap:2,color:tab===t.id?"var(--accent)":"var(--text-dim)",fontWeight:tab===t.id?700:500,fontSize:11}}>
+        <span style={{fontSize:18}}>{t.i}</span>{t.l}
+      </button>)}
+    </div>
+  </div>;
+}
+
+// ═══ MAIN APP ═══
+function App(){
+  const[loaded,setLoaded]=useState(false);
+  const[syncStatus,setSyncStatus]=useState("loading"); // loading, ok, error
+  const[user,setUser]=useState(()=>localStorage.getItem("energie-user"));
+  const[people,setPeople]=useState([
+    {id:"owner",name:"Já (majitel)",isOwner:true,monthlyAdvance:0},
+    {id:"r1",name:"Spolubydlící 1",isOwner:false,monthlyAdvance:3000},
+    {id:"r2",name:"Spolubydlící 2",isOwner:false,monthlyAdvance:3000},
+    {id:"r3",name:"Spolubydlící 3",isOwner:false,monthlyAdvance:2500},
+  ]);
+  const[advances,setAdvances]=useState([]);
+  const[bills,setBills]=useState([]);
+  const now=new Date();
+  const[startPeriod,setStartPeriod]=useState(pk(now.getFullYear(),now.getMonth()));
+  const saveTimer=useRef(null);
+
+  // Firebase realtime listener
+  useEffect(()=>{
+    const unsub=DOC.onSnapshot(snap=>{
+      if(snap.exists){
+        const d=snap.data();
+        if(d.people)setPeople(d.people);
+        if(d.advances)setAdvances(d.advances);
+        if(d.bills)setBills(d.bills);
+        if(d.startPeriod)setStartPeriod(d.startPeriod);
+      }
+      setLoaded(true);
+      setSyncStatus("ok");
+    },err=>{
+      console.error("Firestore listen error:",err);
+      setSyncStatus("error");
+      // Fallback to localStorage
+      try{
+        const local=JSON.parse(localStorage.getItem("energie-backup")||"null");
+        if(local){
+          if(local.people)setPeople(local.people);
+          if(local.advances)setAdvances(local.advances);
+          if(local.bills)setBills(local.bills);
+          if(local.startPeriod)setStartPeriod(local.startPeriod);
+        }
+      }catch(e){}
+      setLoaded(true);
+    });
+    return()=>unsub();
+  },[]);
+
+  // Debounced save to Firebase
+  const saveToFirebase=useCallback((data)=>{
+    if(saveTimer.current)clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{
+      setSyncStatus("loading");
+      DOC.set(data,{merge:true}).then(()=>{
+        setSyncStatus("ok");
+        localStorage.setItem("energie-backup",JSON.stringify(data));
+      }).catch(err=>{
+        console.error("Save error:",err);
+        setSyncStatus("error");
+        localStorage.setItem("energie-backup",JSON.stringify(data));
+      });
+    },500);
+  },[]);
+
+  // Wrapped setters that auto-save
+  const sp=useCallback(v=>{const n=typeof v==="function"?v(people):v;setPeople(n);if(loaded)saveToFirebase({people:n,advances,bills,startPeriod})},[advances,bills,startPeriod,loaded]);
+  const sa=useCallback(v=>{const n=typeof v==="function"?v(advances):v;setAdvances(n);if(loaded)saveToFirebase({people,advances:n,bills,startPeriod})},[people,bills,startPeriod,loaded]);
+  const sb=useCallback(v=>{const n=typeof v==="function"?v(bills):v;setBills(n);if(loaded)saveToFirebase({people,advances,bills:n,startPeriod})},[people,advances,startPeriod,loaded]);
+  const ssp=useCallback(v=>{setStartPeriod(v);if(loaded)saveToFirebase({people,advances,bills,startPeriod:v})},[people,advances,bills,loaded]);
+
+  const selectUser=(id)=>{setUser(id);localStorage.setItem("energie-user",id)};
+  const logout=()=>{setUser(null);localStorage.removeItem("energie-user")};
+
+  if(!loaded)return<div style={{padding:60,textAlign:"center",color:"var(--text-dim)",fontFamily:"system-ui"}}>
+    <div style={{fontSize:48,marginBottom:16}}>⚡</div>Načítám data...
+  </div>;
+
+  const cp=pk(now.getFullYear(),now.getMonth());
+
+  // Sync indicator
+  const syncDot=<span className={`sync-dot ${syncStatus==="ok"?"sync-ok":syncStatus==="error"?"sync-err":"sync-loading"}`} title={syncStatus==="ok"?"Synchronizováno":syncStatus==="error"?"Offline / chyba":"Ukládám..."} />;
+
+  if(!user){
+    return <div><Login people={people} onSelect={selectUser} />
+      <div style={{position:"fixed",bottom:12,left:0,right:0,textAlign:"center",fontSize:12,color:"var(--text-dim)"}}>{syncDot}{syncStatus==="ok"?"Online":"Offline"}</div>
+    </div>;
+  }
+
+  const me=people.find(p=>p.id===user);
+  if(!me){logout();return null}
+
+  return <div>
+    {me.isOwner
+      ?<Owner people={people} setPeople={sp} advances={advances} setAdvances={sa} bills={bills} setBills={sb} startPeriod={startPeriod} setStartPeriod={ssp} onLogout={logout} />
+      :<Roommate me={me} people={people} advances={advances} setAdvances={sa} bills={bills} startPeriod={startPeriod} currentPeriod={cp} onLogout={logout} />
+    }
+    <div style={{position:"fixed",top:12,right:12,fontSize:11,color:"var(--text-dim)",zIndex:999}}>{syncDot}</div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
