@@ -59,7 +59,13 @@ const fCZK=n=>new Intl.NumberFormat("cs-CZ",{style:"currency",currency:"CZK",min
 const pk=(y,m)=>`${y}-${String(m+1).padStart(2,"0")}`;
 const pl=p=>{const[y,m]=p.split("-");return`${MC[parseInt(m,10)-1]} ${y}`};
 const allP=(s,e)=>{const r=[];let[sy,sm]=s.split("-").map(Number);const[ey,em]=e.split("-").map(Number);while(sy<ey||(sy===ey&&sm<=em)){r.push(pk(sy,sm-1));sm++;if(sm>12){sm=1;sy++}}return r};
-const getAdv=(person)=>person.monthlyAdvance||0;
+const getAdv=(person,period)=>{
+  if(!person.advanceHistory||person.advanceHistory.length===0)return person.monthlyAdvance||0;
+  const sorted=[...person.advanceHistory].sort((a,b)=>a.from.localeCompare(b.from));
+  let amt=sorted[0].amount;
+  for(const e of sorted){if(e.from<=period)amt=e.amount;else break}
+  return amt;
+};
 
 // ─── Styles ───
 const cs={background:"var(--card)",borderRadius:12,border:"1px solid var(--border)"};
@@ -80,6 +86,7 @@ function SC({label,value,color,sub}){
 
 // ═══ LOGIN ═══
 function Login({people,onSelect}){
+  const cp=pk(new Date().getFullYear(),new Date().getMonth());
   return <div style={{minHeight:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
     <div style={{fontSize:48,marginBottom:16}}>⚡</div>
     <h1 style={{fontSize:24,fontWeight:700,marginBottom:4}}>Energie</h1>
@@ -88,7 +95,7 @@ function Login({people,onSelect}){
       {people.map(p=><button key={p.id} onClick={()=>onSelect(p.id)} style={{...cs,padding:"16px 20px",display:"flex",alignItems:"center",gap:14,cursor:"pointer",border:"2px solid var(--border)",textAlign:"left"}}>
         <div style={{width:42,height:42,borderRadius:"50%",background:p.isOwner?"var(--accent)":"var(--muted)",display:"flex",alignItems:"center",justifyContent:"center",color:p.isOwner?"#fff":"var(--text-dim)",fontWeight:700,fontSize:16,flexShrink:0}}>{p.name.charAt(0).toUpperCase()}</div>
         <div><div style={{fontWeight:600,fontSize:15}}>{p.name}</div>
-        <div style={{fontSize:12,color:"var(--text-dim)"}}>{p.isOwner?"Majitel — správce":`Záloha ${fCZK(getAdv(p))}/měs.`}</div></div>
+        <div style={{fontSize:12,color:"var(--text-dim)"}}>{p.isOwner?"Majitel — správce":`Záloha ${fCZK(getAdv(p,cp))}/měs.`}</div></div>
       </button>)}
     </div>
   </div>;
@@ -97,7 +104,7 @@ function Login({people,onSelect}){
 // ═══ ROOMMATE ═══
 function Roommate({me,people,advances,setAdvances,bills,startPeriod,currentPeriod,onLogout}){
   const[tab,setTab]=useState("overview");
-  const[amount,setAmount]=useState(String(getAdv(me)));
+  const[amount,setAmount]=useState(String(getAdv(me,currentPeriod)));
   const[note,setNote]=useState("");
   const now=new Date();
   const[sY,setSY]=useState(now.getFullYear());
@@ -106,9 +113,9 @@ function Roommate({me,people,advances,setAdvances,bills,startPeriod,currentPerio
   const prev=()=>{if(sM===0){setSM(11);setSY(y=>y-1)}else setSM(m=>m-1)};
   const next=()=>{if(sM===11){setSM(0);setSY(y=>y+1)}else setSM(m=>m+1)};
 
-  const myAdv=getAdv(me);
   const periods=allP(startPeriod,currentPeriod);
-  const totalExp=periods.length*myAdv;
+  const myAdv=getAdv(me,vp);
+  const totalExp=periods.reduce((s,pd)=>s+getAdv(me,pd),0);
   const myAdvances=advances.filter(a=>a.personId===me.id);
   const totalPaid=myAdvances.reduce((s,a)=>s+a.amount,0);
   const advDebt=totalExp-totalPaid;
@@ -157,7 +164,7 @@ function Roommate({me,people,advances,setAdvances,bills,startPeriod,currentPerio
         {advDebt>0?<div style={{background:"linear-gradient(135deg,#dc2626,#ef4444)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
           <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>DLUŽNÉ ZÁLOHY</div>
           <div style={{fontSize:30,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{fCZK(advDebt)}</div>
-          <div style={{fontSize:13,opacity:.8,marginTop:4}}>{periods.length} × {fCZK(myAdv)} = {fCZK(totalExp)} · zaplaceno {fCZK(totalPaid)}</div>
+          <div style={{fontSize:13,opacity:.8,marginTop:4}}>Celkem: {fCZK(totalExp)} · zaplaceno {fCZK(totalPaid)}</div>
         </div>:<div style={{background:"linear-gradient(135deg,#16a34a,#22c55e)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
           <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>ZÁLOHY</div>
           <div style={{fontSize:22,fontWeight:700}}>Vše zaplaceno ✓</div>
@@ -170,6 +177,20 @@ function Roommate({me,people,advances,setAdvances,bills,startPeriod,currentPerio
           <div style={{fontSize:12,opacity:.8,marginTop:4}}>Podíl: {fCZK(myShare)} · Zaplaceno: {fCZK(totalPaid)}</div>
         </div>}
 
+        <div style={{marginBottom:16}}>
+          <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Celkový přehled od {pl(startPeriod)}</h3>
+          <div style={{...cs,padding:"14px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Zaplaceno na zálohách</span><span style={{fontWeight:700,color:"var(--green)"}}>{fCZK(totalPaid)}</span></div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Očekávané zálohy</span><span style={{fontWeight:600,color:"var(--accent)"}}>{fCZK(totalExp)}</span></div>
+            <div style={{borderTop:"1px solid var(--border)",margin:"6px 0"}} />
+            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Faktury celkem</span><span style={{fontWeight:600,color:"var(--orange)"}}>{fCZK(totalBills)}</span></div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Tvůj podíl (1/{people.length})</span><span style={{fontWeight:600,color:"var(--orange)"}}>{fCZK(myShare)}</span></div>
+            <div style={{borderTop:"1px solid var(--border)",margin:"6px 0"}} />
+            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontWeight:600}}>Bilance (zálohy − podíl)</span><span style={{fontWeight:700,color:realBal>=0?"var(--green)":"var(--red)"}}>{realBal>=0?`přeplatek ${fCZK(realBal)}`:`nedoplatek ${fCZK(Math.abs(realBal))}`}</span></div>
+          </div>
+        </div>
+
+        <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>{pl(vp)}</h3>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
           <SC label="Záloha měsíc" value={fCZK(pExp)} color="var(--accent)" />
           <SC label="Zaplaceno" value={fCZK(pPaid)} color={pPaid>=pExp&&pExp>0?"var(--green)":"var(--orange)"} />
@@ -281,19 +302,41 @@ function ODash({people,advances,bills,startPeriod,currentPeriod}){
   const tB=pB.reduce((s,b)=>s+b.amount,0);
   const tA=pA.reduce((s,a)=>s+a.amount,0);
   const pp=people.length>0?tB/people.length:0;
-  const expAll=rm.reduce((s,r)=>s+getAdv(r),0);
+  const expAll=rm.reduce((s,r)=>s+getAdv(r,currentPeriod),0);
 
   const stats=rm.map(p=>{
-    const ma=getAdv(p);
-    const tE=periods.length*ma;
+    const ma=getAdv(p,currentPeriod);
+    const tE=periods.reduce((s,pd)=>s+getAdv(p,pd),0);
     const tP=advances.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
     const debt=tE-tP;
     const thisP=pA.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
     return{...p,ma,tE,tP,debt,thisP,ok:thisP>=ma};
   });
   const totalDebt=stats.reduce((s,r)=>s+Math.max(0,r.debt),0);
+  const allBillsTotal=bills.reduce((s,b)=>s+b.amount,0);
+  const allPerPersonShare=people.length>0?allBillsTotal/people.length:0;
+  const allPaidTotal=stats.reduce((s,r)=>s+r.tP,0);
+  const allExpTotal=stats.reduce((s,r)=>s+r.tE,0);
 
   return <div>
+    <div style={{marginBottom:20}}>
+      <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Celkový přehled od {pl(startPeriod)}</h3>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+        <SC label="Faktury celkem" value={fCZK(allBillsTotal)} color="var(--orange)" />
+        <SC label="Zálohy přijaté" value={fCZK(allPaidTotal)} color="var(--green)" sub={`oček. ${fCZK(allExpTotal)}`} />
+      </div>
+      {allBillsTotal>0&&<div style={{...cs,padding:"14px 16px"}}>
+        <div style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase"}}>Skutečné vyúčtování</div>
+        <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",marginBottom:4}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Podíl na osobu (1/{people.length})</span><span style={{fontWeight:600,color:"var(--accent)"}}>{fCZK(allPerPersonShare)}</span></div>
+        <div style={{borderTop:"1px solid var(--border)",paddingTop:8}}>
+          {stats.map(r=>{const bal=r.tP-allPerPersonShare;return<div key={r.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"4px 0"}}>
+            <span>{r.name}<span style={{color:"var(--text-dim)",marginLeft:4,fontSize:12}}>({fCZK(r.tP)})</span></span>
+            <span style={{fontWeight:700,color:bal>=0?"var(--green)":"var(--red)"}}>{bal>=0?`přeplatek ${fCZK(bal)}`:`doplatit ${fCZK(Math.abs(bal))}`}</span>
+          </div>})}
+        </div>
+      </div>}
+    </div>
+
     <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>{pl(currentPeriod)}</h2>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:20}}>
       <SC label="Faktury" value={fCZK(tB)} color="var(--orange)" />
@@ -343,15 +386,15 @@ function OAdv({people,advances,setAdvances,currentPeriod}){
   const[note,setNote]=useState("");
   const pA=advances.filter(a=>a.period===currentPeriod);
 
-  useEffect(()=>{if(selPerson)setAmount(String(getAdv(selPerson)))},[pid]);
+  useEffect(()=>{if(selPerson)setAmount(String(getAdv(selPerson,currentPeriod)))},[pid]);
 
-  const add=()=>{if(!pid||!amount)return;setAdvances([...advances,{id:gid(),personId:pid,amount:parseFloat(amount),note,period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount(selPerson?String(getAdv(selPerson)):"");setNote("")};
+  const add=()=>{if(!pid||!amount)return;setAdvances([...advances,{id:gid(),personId:pid,amount:parseFloat(amount),note,period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount(selPerson?String(getAdv(selPerson,currentPeriod)):"");setNote("")};
   const del=id=>setAdvances(advances.filter(a=>a.id!==id));
   return <div>
     <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Zálohy — {pl(currentPeriod)}</h2>
     <div style={{...cs,padding:16,marginBottom:20}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-        <div><label style={ls}>Od koho</label><select value={pid} onChange={e=>setPid(e.target.value)} style={is}><option value="">Vyber...</option>{rm.map(p=><option key={p.id} value={p.id}>{p.name} ({fCZK(getAdv(p))})</option>)}</select></div>
+        <div><label style={ls}>Od koho</label><select value={pid} onChange={e=>setPid(e.target.value)} style={is}><option value="">Vyber...</option>{rm.map(p=><option key={p.id} value={p.id}>{p.name} ({fCZK(getAdv(p,currentPeriod))})</option>)}</select></div>
         <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} style={is}/></div>
       </div>
       <div style={{marginBottom:10}}><label style={ls}>Poznámka</label><input value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="VS, pozn..." style={is}/></div>
@@ -372,9 +415,10 @@ function OAdv({people,advances,setAdvances,currentPeriod}){
 
 function OBills({bills,setBills,currentPeriod}){
   const[desc,setDesc]=useState("Elektřina");
+  const[customDesc,setCustomDesc]=useState("");
   const[amount,setAmount]=useState("");
   const pB=bills.filter(b=>b.period===currentPeriod);
-  const add=()=>{if(!amount)return;setBills([...bills,{id:gid(),description:desc,amount:parseFloat(amount),period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount("")};
+  const add=()=>{if(!amount)return;const finalDesc=desc==="Jiné"&&customDesc.trim()?customDesc.trim():desc;setBills([...bills,{id:gid(),description:finalDesc,amount:parseFloat(amount),period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount("");setCustomDesc("")};
   const del=id=>setBills(bills.filter(b=>b.id!==id));
   return <div>
     <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Faktury — {pl(currentPeriod)}</h2>
@@ -383,6 +427,7 @@ function OBills({bills,setBills,currentPeriod}){
         <div><label style={ls}>Typ</label><select value={desc} onChange={e=>setDesc(e.target.value)} style={is}>{["Elektřina","Plyn","Voda","Teplo","Jiné"].map(o=><option key={o}>{o}</option>)}</select></div>
         <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="0" style={is}/></div>
       </div>
+      {desc==="Jiné"&&<div style={{marginBottom:10}}><label style={ls}>Popis</label><input value={customDesc} onChange={e=>setCustomDesc(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="Za co to je..." style={is}/></div>}
       <button onClick={add} style={{...bs,width:"100%"}}>+ Přidat fakturu</button>
     </div>
     {pB.length===0?<p style={{textAlign:"center",color:"var(--text-dim)",padding:20}}>Žádné faktury</p>:
@@ -398,20 +443,40 @@ function OBills({bills,setBills,currentPeriod}){
 }
 
 function OSettings({people,setPeople,startPeriod,setStartPeriod}){
+  const cp=pk(new Date().getFullYear(),new Date().getMonth());
   const[editing,setEditing]=useState(null);
   const[draft,setDraft]=useState("");
-  const[advDraft,setAdvDraft]=useState("");
+  const[advHistDraft,setAdvHistDraft]=useState([]);
+  const[newAdvFrom,setNewAdvFrom]=useState(cp);
+  const[newAdvAmount,setNewAdvAmount]=useState("");
 
-  const startEdit=(p)=>{setEditing(p.id);setDraft(p.name);setAdvDraft(String(getAdv(p)))};
+  const startEdit=(p)=>{
+    setEditing(p.id);setDraft(p.name);
+    if(p.advanceHistory&&p.advanceHistory.length>0)setAdvHistDraft([...p.advanceHistory]);
+    else setAdvHistDraft([{from:startPeriod,amount:p.monthlyAdvance||0}]);
+    setNewAdvFrom(cp);setNewAdvAmount("");
+  };
   const save=()=>{
     if(draft.trim()){
-      setPeople(people.map(p=>p.id===editing?{...p,name:draft.trim(),monthlyAdvance:parseFloat(advDraft)||0}:p));
+      const ep=people.find(x=>x.id===editing);
+      if(ep&&ep.isOwner)setPeople(people.map(x=>x.id===editing?{...x,name:draft.trim()}:x));
+      else{const sorted=[...advHistDraft].sort((a,b)=>a.from.localeCompare(b.from));setPeople(people.map(x=>x.id===editing?{...x,name:draft.trim(),advanceHistory:sorted,monthlyAdvance:sorted[sorted.length-1].amount}:x))}
     }
     setEditing(null);
   };
-  const addPerson=()=>setPeople([...people,{id:gid(),name:`Spolubydlící ${people.length}`,isOwner:false,monthlyAdvance:3000}]);
+  const addAdvEntry=()=>{
+    if(!newAdvAmount)return;
+    const ex=advHistDraft.findIndex(e=>e.from===newAdvFrom);
+    if(ex>=0){const u=[...advHistDraft];u[ex]={from:newAdvFrom,amount:parseFloat(newAdvAmount)};setAdvHistDraft(u)}
+    else setAdvHistDraft([...advHistDraft,{from:newAdvFrom,amount:parseFloat(newAdvAmount)}]);
+    setNewAdvAmount("");
+  };
+  const delAdvEntry=(from)=>setAdvHistDraft(advHistDraft.filter(e=>e.from!==from));
+  const addPerson=()=>setPeople([...people,{id:gid(),name:`Spolubydlící ${people.length}`,isOwner:false,advanceHistory:[{from:startPeriod,amount:3000}],monthlyAdvance:3000}]);
   const delPerson=id=>{if(people.length<=2)return;setPeople(people.filter(p=>p.id!==id))};
   const[spY,spM]=startPeriod.split("-").map(Number);
+  const sortedHist=[...advHistDraft].sort((a,b)=>a.from.localeCompare(b.from));
+  const[nfY,nfM]=newAdvFrom.split("-").map(Number);
 
   return <div>
     <h2 style={{margin:"0 0 20px",fontSize:20,fontWeight:600}}>Nastavení</h2>
@@ -436,10 +501,41 @@ function OSettings({people,setPeople,startPeriod,setStartPeriod}){
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       {people.map(p=><div key={p.id} style={{...cs,padding:"14px 16px"}}>
         {editing===p.id?<div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-            <div><label style={ls}>Jméno</label><input value={draft} onChange={e=>setDraft(e.target.value)} style={is} autoFocus /></div>
-            {!p.isOwner&&<div><label style={ls}>Záloha (Kč/měs.)</label><input type="number" value={advDraft} onChange={e=>setAdvDraft(e.target.value)} style={is} /></div>}
+          <div style={{marginBottom:8}}>
+            <label style={ls}>Jméno</label>
+            <input value={draft} onChange={e=>setDraft(e.target.value)} style={is} autoFocus />
           </div>
+          {!p.isOwner&&<div style={{marginBottom:10}}>
+            <label style={{...ls,marginBottom:8}}>Zálohy podle období</label>
+            <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:10}}>
+              {sortedHist.map(entry=><div key={entry.from} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:"var(--input-bg)",borderRadius:8}}>
+                <span style={{fontSize:13,color:"var(--text-dim)",minWidth:100}}>od {pl(entry.from)}</span>
+                <span style={{fontWeight:600,flex:1}}>{fCZK(entry.amount)}/měs.</span>
+                {advHistDraft.length>1&&<button onClick={()=>delAdvEntry(entry.from)} style={{...bsd,padding:"2px 8px",fontSize:12}}>✕</button>}
+              </div>)}
+            </div>
+            <div style={{padding:"10px 12px",background:"var(--input-bg)",borderRadius:10,border:"1px solid var(--border)"}}>
+              <div style={{fontSize:11,fontWeight:600,color:"var(--text-dim)",marginBottom:6,textTransform:"uppercase"}}>Přidat změnu zálohy</div>
+              <div style={{display:"flex",gap:6,alignItems:"end"}}>
+                <div style={{flex:1}}>
+                  <label style={ls}>Od</label>
+                  <div style={{display:"flex",gap:4}}>
+                    <select value={nfM} onChange={e=>setNewAdvFrom(pk(nfY,parseInt(e.target.value)-1))} style={{...is,flex:1,padding:"8px 6px"}}>
+                      {MC.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                    </select>
+                    <select value={nfY} onChange={e=>setNewAdvFrom(pk(parseInt(e.target.value),nfM-1))} style={{...is,width:72,padding:"8px 6px"}}>
+                      {[2024,2025,2026,2027,2028].map(y=><option key={y} value={y}>{y}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={ls}>Kč/měs.</label>
+                  <input type="number" value={newAdvAmount} onChange={e=>setNewAdvAmount(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addAdvEntry()} placeholder="0" style={{...is,padding:"8px 6px"}} />
+                </div>
+                <button onClick={addAdvEntry} style={{...bs,padding:"8px 14px",flexShrink:0}}>+</button>
+              </div>
+            </div>
+          </div>}
           <div style={{display:"flex",gap:8}}>
             <button onClick={save} style={{...bs,flex:1}}>Uložit</button>
             <button onClick={()=>setEditing(null)} style={{...bsm,flex:0}}>Zrušit</button>
@@ -449,7 +545,7 @@ function OSettings({people,setPeople,startPeriod,setStartPeriod}){
           <div style={{flex:1}}>
             <div style={{fontWeight:600}}>{p.name}</div>
             {p.isOwner?<div style={{fontSize:12,color:"var(--accent)"}}>Majitel — platí faktury</div>
-            :<div style={{fontSize:13,color:"var(--text-dim)"}}>Záloha: <strong style={{color:"var(--text)"}}>{fCZK(getAdv(p))}</strong>/měs.</div>}
+            :<div style={{fontSize:13,color:"var(--text-dim)"}}>Záloha: <strong style={{color:"var(--text)"}}>{fCZK(getAdv(p,cp))}</strong>/měs.{p.advanceHistory&&p.advanceHistory.length>1&&<span style={{fontSize:11,marginLeft:4,color:"var(--accent)"}}>({p.advanceHistory.length} období)</span>}</div>}
           </div>
           <button onClick={()=>startEdit(p)} style={bsm}>✎</button>
           {!p.isOwner&&<button onClick={()=>delPerson(p.id)} style={bsd}>✕</button>}
