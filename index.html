@@ -463,21 +463,18 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
 
   // Náklady: faktury za měsíce do cutoffPeriod včetně
   const billsIn=bills.filter(b=>b.period<=cutoffPeriod&&b.period>=startPeriod);
-  // Platby: podle data platby ≤ cutoff (fallback na period)
-  const paysIn=advances.filter(a=>{
-    if(a.date)return a.date<=cutoff;
-    return a.period&&a.period<=cutoffPeriod;
-  });
+  // Zálohy/nedoplatky: VŠECHNY kdykoli zaplacené (i pozdější splátky dluhu z 07/08)
+  const allZalohy=advances.filter(isZaloha);
+  const allNedo=advances.filter(isNedo);
 
   const totalBills=billsIn.reduce((s,b)=>s+b.amount,0);
-  const totalZ=paysIn.filter(isZaloha).reduce((s,a)=>s+a.amount,0);
-  const totalN=paysIn.filter(isNedo).reduce((s,a)=>s+a.amount,0);
+  const totalZ=allZalohy.reduce((s,a)=>s+a.amount,0);
+  const totalN=allNedo.reduce((s,a)=>s+a.amount,0);
 
   const rows=rm.map(p=>{
     const expected=periods.reduce((s,pd)=>s+getAdv(p,pd),0);
-    const pPays=paysIn.filter(a=>a.personId===p.id);
-    const zalohy=pPays.filter(isZaloha).reduce((s,a)=>s+a.amount,0);
-    const nedo=pPays.filter(isNedo).reduce((s,a)=>s+a.amount,0);
+    const zalohy=allZalohy.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
+    const nedo=allNedo.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
     const paid=zalohy+nedo;
     const share=personShareOfBills(billsIn,p.id,shareHistory,people);
     const advDebt=expected-zalohy;
@@ -494,7 +491,7 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
 
   return <div>
     <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:600}}>Vyúčtování k datu</h2>
-    <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Spočítá zálohy a náklady jen do zvoleného data (včetně).</p>
+    <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Náklady a očekávané zálohy do zvoleného data; zaplacené zálohy = vše, co kdy poslali (i později).</p>
 
     <div style={{...cs,padding:16,marginBottom:16}}>
       <label style={ls}>Vyúčtovat k datu</label>
@@ -509,14 +506,14 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
         })}
       </div>
       <p style={{fontSize:12,color:"var(--text-dim)",marginTop:10}}>
-        Období: <strong style={{color:"var(--text)"}}>{pl(startPeriod)}</strong> → <strong style={{color:"var(--text)"}}>{pl(cutoffPeriod)}</strong> ({periods.length} měs.) · platby s datem ≤ {fDate(cutoff)}
+        Období nákladů/oček. záloh: <strong style={{color:"var(--text)"}}>{pl(startPeriod)}</strong> → <strong style={{color:"var(--text)"}}>{pl(cutoffPeriod)}</strong> ({periods.length} měs.)
       </p>
     </div>
 
     {periods.length===0?<div style={{...cs,padding:20,textAlign:"center",color:"var(--text-dim)"}}>Datum je před začátkem sledování</div>:<>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
         <SC label="Náklady do data" value={fCZK(totalBills)} color="var(--orange)" sub={`${billsIn.length} faktur`} />
-        <SC label="Zálohy do data" value={fCZK(totalZ)} color="var(--green)" sub={totalN>0?`+ nedoplatky ${fCZK(totalN)}`:undefined} />
+        <SC label="Zálohy celkem (kdykoli)" value={fCZK(totalZ)} color="var(--green)" sub={totalN>0?`+ nedoplatky ${fCZK(totalN)}`:undefined} />
       </div>
 
       <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Výsledek k {fDate(cutoff)}</h3>
@@ -527,10 +524,10 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
             <span style={{fontWeight:700,fontSize:16,color:r.bal>=0?"var(--green)":"var(--red)"}}>{r.bal>=0?`přeplatek ${fCZK(r.bal)}`:`nedoplatek ${fCZK(Math.abs(r.bal))}`}</span>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px",fontSize:12,color:"var(--text-dim)"}}>
-            <span>Očekávané zálohy</span><span style={{textAlign:"right",fontWeight:600,color:"var(--text)"}}>{fCZK(r.expected)}</span>
-            <span>Zaplacené zálohy</span><span style={{textAlign:"right",fontWeight:600,color:"var(--green)"}}>{fCZK(r.zalohy)}</span>
+            <span>Očekávané zálohy (do {pl(cutoffPeriod)})</span><span style={{textAlign:"right",fontWeight:600,color:"var(--text)"}}>{fCZK(r.expected)}</span>
+            <span>Zaplacené zálohy (všechny)</span><span style={{textAlign:"right",fontWeight:600,color:"var(--green)"}}>{fCZK(r.zalohy)}</span>
             {r.nedo>0&&<><span>Zaplacené nedoplatky</span><span style={{textAlign:"right",fontWeight:600,color:"var(--orange)"}}>{fCZK(r.nedo)}</span></>}
-            <span>Dluh na zálohách</span><span style={{textAlign:"right",fontWeight:600,color:r.advDebt>0?"var(--red)":"var(--green)"}}>{r.advDebt>0?fCZK(r.advDebt):"0"}</span>
+            <span>Dluh na zálohách</span><span style={{textAlign:"right",fontWeight:600,color:r.advDebt>0?"var(--red)":"var(--green)"}}>{r.advDebt>0?fCZK(r.advDebt):(r.advDebt<0?`přeplatek ${fCZK(Math.abs(r.advDebt))}`:"0 ✓")}</span>
             <span style={{borderTop:"1px solid var(--border)",paddingTop:4,marginTop:2}}>Podíl na nákladech</span><span style={{borderTop:"1px solid var(--border)",paddingTop:4,marginTop:2,textAlign:"right",fontWeight:700,color:"var(--orange)"}}>{fCZK(r.share)}</span>
             <span>Platby celkem</span><span style={{textAlign:"right",fontWeight:600}}>{fCZK(r.paid)}</span>
           </div>
@@ -558,7 +555,8 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
         <div style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:6}}>Jak se počítá</div>
         <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"var(--text-dim)",lineHeight:1.55}}>
           <li>Očekávané zálohy = součet měsíčních záloh od {pl(startPeriod)} do {pl(cutoffPeriod)}</li>
-          <li>Zaplacené zálohy/nedoplatky = platby s datem ≤ {fDate(cutoff)}</li>
+          <li>Zaplacené zálohy = <strong>všechny</strong> zálohy, které kdy poslali (i když dluh z 06 splatili v 07/08)</li>
+          <li>Nedoplatky = všechny zaznamenané platby typu nedoplatek</li>
           <li>Náklady = faktury za měsíce ≤ {pl(cutoffPeriod)}, podíl podle poměru daného měsíce</li>
           <li>Bilance = (zálohy + nedoplatky) − podíl na nákladech</li>
         </ul>
