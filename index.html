@@ -75,7 +75,14 @@ const getSharesForPeriod=(shareHistory,period,people)=>{
   let shares={...(sorted[0].shares||{})};
   for(const e of sorted){if(e.from<=period)shares={...e.shares};else break}
   const result={};
-  people.forEach(p=>{result[p.id]=shares[p.id]!=null?Number(shares[p.id]):1});
+  people.forEach(p=>{
+    let w=shares[p.id];
+    // Firestore někdy vrátí number, jindy string; ošetři i chybějící klíče
+    if(w!=null&&typeof w==="object"&&w.integerValue!=null)w=w.integerValue;
+    if(w!=null&&typeof w==="object"&&w.doubleValue!=null)w=w.doubleValue;
+    result[p.id]=w!=null&&w!==""?Number(w):1;
+    if(!Number.isFinite(result[p.id]))result[p.id]=1;
+  });
   return result;
 };
 const shareSum=shares=>Object.values(shares).reduce((s,w)=>s+Number(w||0),0);
@@ -90,8 +97,34 @@ const fmtRatio=(shareHistory,personId,period,people)=>{
   const total=shareSum(shares);
   return`${shares[personId]||0}/${total}`;
 };
+const billFrom=b=>b.periodFrom||b.period;
+const billTo=b=>b.periodTo||b.period;
+const billMonths=b=>{
+  const from=billFrom(b),to=billTo(b);
+  if(!from||!to||from>to)return from?[from]:[];
+  return allP(from,to);
+};
+const billPeriodLabel=b=>{
+  const from=billFrom(b),to=billTo(b);
+  if(!from)return"";
+  if(from===to)return pl(from);
+  return`${pl(from)} – ${pl(to)}`;
+};
+const billOverlaps=(b,start,end)=>billFrom(b)<=end&&billTo(b)>=start;
+const billMonthAmount=(b,period)=>{
+  const months=billMonths(b);
+  if(!months.length||!months.includes(period))return 0;
+  return b.amount/months.length;
+};
+/** Podíl osoby na faktuře: částka se rovnoměrně rozloží do měsíců období a v každém se použije poměr daného měsíce */
+const personShareOfBill=(b,personId,shareHistory,people)=>{
+  const months=billMonths(b);
+  if(!months.length)return 0;
+  const perMonth=b.amount/months.length;
+  return months.reduce((s,pd)=>s+perMonth*getShareFrac(shareHistory,personId,pd,people),0);
+};
 const personShareOfBills=(bills,personId,shareHistory,people)=>
-  bills.reduce((s,b)=>s+b.amount*getShareFrac(shareHistory,personId,b.period,people),0);
+  bills.reduce((s,b)=>s+personShareOfBill(b,personId,shareHistory,people),0);
 const personShareOfAmount=(amount,personId,period,shareHistory,people)=>
   amount*getShareFrac(shareHistory,personId,period,people);
 const periodOfDate=d=>(d||"").slice(0,7);
@@ -102,7 +135,7 @@ const lastDayOfMonth=(y,m)=>{const mm=String(m).padStart(2,"0");const last=new D
 const computeSettlement=(people,advances,bills,shareHistory,startPeriod,cutoff)=>{
   const cutoffPeriod=periodOfDate(cutoff);
   const periods=cutoffPeriod>=startPeriod?allP(startPeriod,cutoffPeriod):[];
-  const billsIn=bills.filter(b=>b.period<=cutoffPeriod&&b.period>=startPeriod);
+  const billsIn=bills.filter(b=>billOverlaps(b,startPeriod,cutoffPeriod)&&billTo(b)<=cutoffPeriod);
   const allZalohy=advances.filter(isZaloha);
   // nedoplatky bez vazby na uzavřené vyúčtování (ty už jsou „spotřebované“)
   const allNedo=advances.filter(a=>isNedo(a)&&!a.settlementId);
@@ -201,9 +234,9 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
   const pPayments=myPayments.filter(a=>a.period===vp);
   const pPaidZ=pZalohy.reduce((s,a)=>s+a.amount,0);
   const pExp=periods.includes(vp)?myAdv:0;
-  const pBills=bills.filter(b=>b.period===vp);
-  const pBT=pBills.reduce((s,b)=>s+b.amount,0);
-  const pPP=personShareOfAmount(pBT,me.id,vp,shareHistory,people);
+  const pBills=bills.filter(b=>billOverlaps(b,vp,vp));
+  const pBT=pBills.reduce((s,b)=>s+billMonthAmount(b,vp),0);
+  const pPP=pBills.reduce((s,b)=>s+billMonthAmount(b,vp)*getShareFrac(shareHistory,me.id,vp,people),0);
 
   useEffect(()=>{
     if(payKind==="zaloha"){setSettleId("");setAmount(String(getAdv(me,vp)));}
@@ -312,7 +345,10 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             {pBills.map(b=><div key={b.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
               <span style={{fontSize:18}}>{ico[b.description]||"📄"}</span>
-              <span style={{flex:1,fontWeight:500,fontSize:14}}>{b.description}</span>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:500,fontSize:14}}>{b.description}</div>
+                <div style={{fontSize:12,color:"var(--text-dim)"}}>{billPeriodLabel(b)} · tvůj podíl {fCZK(personShareOfBill(b,me.id,shareHistory,people))}</div>
+              </div>
               <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(b.amount)}</span>
             </div>)}
             <div style={{...cs,padding:"12px 16px",background:"var(--input-bg)"}}>
@@ -400,7 +436,7 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
                   <span style={{fontWeight:700,color:payColor(item)}}>+{fCZK(item.amount)}</span>
                 </>:<>
                   <div style={{width:28,height:28,borderRadius:"50%",background:"#fff7ed",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{ico[item.description]||"📄"}</div>
-                  <div style={{flex:1}}><div style={{fontWeight:500,fontSize:14}}>{item.description}</div><div style={{fontSize:12,color:"var(--text-dim)"}}>{item.date} · podíl {fCZK(personShareOfAmount(item.amount,me.id,item.period,shareHistory,people))} ({fmtRatio(shareHistory,me.id,item.period,people)})</div></div>
+                  <div style={{flex:1}}><div style={{fontWeight:500,fontSize:14}}>{item.description}</div><div style={{fontSize:12,color:"var(--text-dim)"}}>{item.date} · {billPeriodLabel(item)} · podíl {fCZK(personShareOfBill(item,me.id,shareHistory,people))}</div></div>
                   <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(item.amount)}</span>
                 </>}
               </div>)}
@@ -422,10 +458,10 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
 function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod,settlements=[]}){
   const rm=people.filter(p=>!p.isOwner);
   const periods=allP(startPeriod,currentPeriod);
-  const pB=bills.filter(b=>b.period===currentPeriod);
+  const pB=bills.filter(b=>billOverlaps(b,currentPeriod,currentPeriod));
   const pA=advances.filter(a=>a.period===currentPeriod);
   const pAZ=pA.filter(isZaloha);
-  const tB=pB.reduce((s,b)=>s+b.amount,0);
+  const tB=pB.reduce((s,b)=>s+billMonthAmount(b,currentPeriod),0);
   const tA=pAZ.reduce((s,a)=>s+a.amount,0);
   const expAll=rm.reduce((s,r)=>s+getAdv(r,currentPeriod),0);
 
@@ -438,8 +474,8 @@ function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod,set
     const tP=tZ+tN;
     const debt=tE-tZ;
     const thisP=pAZ.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
-    const shareAll=personShareOfBills(bills,p.id,shareHistory,people);
-    const shareMonth=personShareOfAmount(tB,p.id,currentPeriod,shareHistory,people);
+    const shareAll=personShareOfBills(bills.filter(b=>billTo(b)<=currentPeriod||billOverlaps(b,startPeriod,currentPeriod)),p.id,shareHistory,people);
+    const shareMonth=pB.reduce((s,b)=>s+billMonthAmount(b,currentPeriod)*getShareFrac(shareHistory,p.id,currentPeriod,people),0);
     return{...p,ma,tE,tZ,tN,tP,debt,thisP,ok:thisP>=ma,shareAll,shareMonth,ratio:fmtRatio(shareHistory,p.id,currentPeriod,people)};
   });
   const totalDebt=stats.reduce((s,r)=>s+Math.max(0,r.debt),0);
@@ -500,7 +536,7 @@ function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod,set
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:500}}>Faktury celkem</span><span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(tB)}</span></div>
         <div style={{borderTop:"1px solid var(--border)",paddingTop:8}}>
           {people.map(p=>{
-            const share=personShareOfAmount(tB,p.id,currentPeriod,shareHistory,people);
+            const share=pB.reduce((s,b)=>s+billMonthAmount(b,currentPeriod)*getShareFrac(shareHistory,p.id,currentPeriod,people),0);
             const paid=pA.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
             const d=paid-share;
             return<div key={p.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"4px 0"}}>
@@ -523,7 +559,16 @@ function OSettle({people,advances,setAdvances,bills,shareHistory,startPeriod,set
   const{cutoffPeriod,periods,billsIn,rows,totalBills}=computed;
 
   const byPeriod={};
-  billsIn.forEach(b=>{if(!byPeriod[b.period])byPeriod[b.period]={total:0,items:[]};byPeriod[b.period].total+=b.amount;byPeriod[b.period].items.push(b)});
+  billsIn.forEach(b=>{
+    const months=billMonths(b);
+    const per=months.length?b.amount/months.length:b.amount;
+    months.forEach(m=>{
+      if(m<startPeriod||m>cutoffPeriod)return;
+      if(!byPeriod[m])byPeriod[m]={total:0,items:[]};
+      byPeriod[m].total+=per;
+      if(!byPeriod[m].items.find(x=>x.id===b.id))byPeriod[m].items.push(b);
+    });
+  });
   const periodKeys=Object.keys(byPeriod).sort();
   const setQuickMonth=(y,m)=>{setCutoff(lastDayOfMonth(y,m))};
 
@@ -589,6 +634,25 @@ function OSettle({people,advances,setAdvances,bills,shareHistory,startPeriod,set
       </div>
 
       <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Náhled k {fDate(cutoff)}</h3>
+      {(()=>{
+        // Shrnutí: kolik nákladů padá do kterého poměru
+        const regimes=[];
+        periodKeys.forEach(k=>{
+          const ratio=fmtRatio(shareHistory,people[0]?.id,k,people);
+          const last=regimes[regimes.length-1];
+          if(last&&last.ratio===ratio){last.to=k;last.total+=byPeriod[k].total;last.months.push(k)}
+          else regimes.push({ratio,from:k,to:k,total:byPeriod[k].total,months:[k]});
+        });
+        if(regimes.length===0)return null;
+        return <div style={{...cs,padding:"12px 14px",marginBottom:12,background:"var(--input-bg)"}}>
+          <div style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:6}}>Poměry u faktur v tomto vyúčtování</div>
+          {regimes.map((rg,i)=><div key={i} style={{fontSize:13,padding:"3px 0",display:"flex",justifyContent:"space-between",gap:8}}>
+            <span>{pl(rg.from)}{rg.from!==rg.to?` – ${pl(rg.to)}`:""}: <strong>{people.map(p=>`${p.name.split(" ")[0]} ${fmtRatio(shareHistory,p.id,rg.from,people)}`).join(" · ")}</strong></span>
+            <span style={{color:"var(--orange)",fontWeight:600,flexShrink:0}}>{fCZK(rg.total)}</span>
+          </div>)}
+          <p style={{fontSize:11,color:"var(--text-dim)",margin:"8px 0 0"}}>Faktura za více měsíců (např. plyn) se rozloží do měsíců období; v každém měsíci platí poměr z Nastavení. Proto u dlouhodobé faktury nebude podíl čistá 1/4, pokud část období měla 3/10.</p>
+        </div>;
+      })()}
       <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
         {rows.map(r=><div key={r.id} style={{...cs,padding:"14px 16px",borderLeft:`4px solid ${r.bal>=0?"var(--green)":"var(--red)"}`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
@@ -743,31 +807,79 @@ function OAdv({people,advances,setAdvances,currentPeriod,settlements=[]}){
   </div>;
 }
 
-function OBills({bills,setBills,currentPeriod}){
+function OBills({bills,setBills,currentPeriod,shareHistory,people}){
   const[desc,setDesc]=useState("Elektřina");
   const[customDesc,setCustomDesc]=useState("");
   const[amount,setAmount]=useState("");
-  const pB=bills.filter(b=>b.period===currentPeriod);
-  const add=()=>{if(!amount)return;const finalDesc=desc==="Jiné"&&customDesc.trim()?customDesc.trim():desc;setBills([...bills,{id:gid(),description:finalDesc,amount:parseFloat(amount),period:currentPeriod,date:new Date().toISOString().slice(0,10)}]);setAmount("");setCustomDesc("")};
+  const[fromP,setFromP]=useState(currentPeriod);
+  const[toP,setToP]=useState(currentPeriod);
+  useEffect(()=>{setFromP(currentPeriod);setToP(currentPeriod)},[currentPeriod]);
+
+  const pB=bills.filter(b=>billOverlaps(b,currentPeriod,currentPeriod)||b.period===currentPeriod);
+  const add=()=>{
+    if(!amount)return;
+    const finalDesc=desc==="Jiné"&&customDesc.trim()?customDesc.trim():desc;
+    const from=fromP<=toP?fromP:toP;
+    const to=fromP<=toP?toP:fromP;
+    setBills([...bills,{
+      id:gid(),
+      description:finalDesc,
+      amount:parseFloat(amount),
+      period:to,
+      periodFrom:from,
+      periodTo:to,
+      date:new Date().toISOString().slice(0,10),
+    }]);
+    setAmount("");setCustomDesc("");
+  };
   const del=id=>setBills(bills.filter(b=>b.id!==id));
+  const MonthPick=({value,onChange})=>{
+    const[y,m]=value.split("-").map(Number);
+    return <div style={{display:"flex",gap:4}}>
+      <select value={m} onChange={e=>onChange(pk(y,parseInt(e.target.value)-1))} style={{...is,flex:1,padding:"8px 6px"}}>
+        {MC.map((name,i)=><option key={i} value={i+1}>{name}</option>)}
+      </select>
+      <select value={y} onChange={e=>onChange(pk(parseInt(e.target.value),m-1))} style={{...is,width:80,padding:"8px 6px"}}>
+        {[2024,2025,2026,2027,2028].map(yy=><option key={yy} value={yy}>{yy}</option>)}
+      </select>
+    </div>;
+  };
+
   return <div>
-    <h2 style={{margin:"0 0 16px",fontSize:20,fontWeight:600}}>Faktury — {pl(currentPeriod)}</h2>
+    <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:600}}>Faktury</h2>
+    <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Období faktury může být více měsíců (např. plyn 09/2025–06/2026). Podíl se spočítá přes celé období podle poměrů v jednotlivých měsících — ne jen podle jednoho měsíce.</p>
     <div style={{...cs,padding:16,marginBottom:20}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
         <div><label style={ls}>Typ</label><select value={desc} onChange={e=>setDesc(e.target.value)} style={is}>{["Elektřina","Plyn","Voda","Teplo","Jiné"].map(o=><option key={o}>{o}</option>)}</select></div>
         <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="0" style={is}/></div>
       </div>
       {desc==="Jiné"&&<div style={{marginBottom:10}}><label style={ls}>Popis</label><input value={customDesc} onChange={e=>setCustomDesc(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="Za co to je..." style={is}/></div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        <div><label style={ls}>Období od</label><MonthPick value={fromP} onChange={setFromP} /></div>
+        <div><label style={ls}>Období do</label><MonthPick value={toP} onChange={setToP} /></div>
+      </div>
       <button onClick={add} style={{...bs,width:"100%"}}>+ Přidat fakturu</button>
     </div>
-    {pB.length===0?<p style={{textAlign:"center",color:"var(--text-dim)",padding:20}}>Žádné faktury</p>:
+    <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase"}}>Viditelné v {pl(currentPeriod)}</h3>
+    {pB.length===0?<p style={{textAlign:"center",color:"var(--text-dim)",padding:20}}>Žádné faktury pro tento měsíc</p>:
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
-      {pB.map(b=><div key={b.id} style={{...cs,padding:"10px 16px",display:"flex",alignItems:"center",gap:10}}>
-        <span style={{fontSize:18}}>{ico[b.description]||"📄"}</span>
-        <span style={{flex:1,fontWeight:500}}>{b.description}</span>
-        <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(b.amount)}</span>
-        <button onClick={()=>del(b.id)} style={bsd}>✕</button>
-      </div>)}
+      {pB.map(b=>{
+        const months=billMonths(b);
+        return <div key={b.id} style={{...cs,padding:"12px 16px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:18}}>{ico[b.description]||"📄"}</span>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:500}}>{b.description}</div>
+              <div style={{fontSize:12,color:"var(--text-dim)"}}>{billPeriodLabel(b)}{months.length>1?` · ${months.length} měs.`:""}</div>
+            </div>
+            <span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(b.amount)}</span>
+            <button onClick={()=>del(b.id)} style={bsd}>✕</button>
+          </div>
+          {months.length>1&&people&&shareHistory&&<div style={{marginTop:8,paddingTop:8,borderTop:"1px solid var(--border)",fontSize:12,color:"var(--text-dim)"}}>
+            Podíly (rozloženo do měsíců): {people.map(p=>`${p.name.split(" ")[0]} ${fCZK(personShareOfBill(b,p.id,shareHistory,people))}`).join(" · ")}
+          </div>}
+        </div>;
+      })}
     </div>}
   </div>;
 }
@@ -1036,7 +1148,7 @@ function Owner({people,setPeople,advances,setAdvances,bills,setBills,startPeriod
       {tab==="dashboard"&&<ODash people={people} advances={advances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} currentPeriod={cp} settlements={settlements} />}
       {tab==="settle"&&<OSettle people={people} advances={advances} setAdvances={setAdvances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} settlements={settlements} setSettlements={setSettlements} />}
       {tab==="advances"&&<OAdv people={people} advances={advances} setAdvances={setAdvances} currentPeriod={cp} settlements={settlements} />}
-      {tab==="bills"&&<OBills bills={bills} setBills={setBills} currentPeriod={cp} />}
+      {tab==="bills"&&<OBills bills={bills} setBills={setBills} currentPeriod={cp} shareHistory={shareHistory} people={people} />}
       {tab==="settings"&&<OSettings people={people} setPeople={setPeople} startPeriod={startPeriod} setStartPeriod={setStartPeriod} shareHistory={shareHistory} setShareHistory={setShareHistory} />}
     </div>
     <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--card)",borderTop:"1px solid var(--border)",padding:"6px 0 env(safe-area-inset-bottom, 6px)",display:"flex",justifyContent:"center",gap:2}}>
@@ -1065,34 +1177,38 @@ function App(){
   const now=new Date();
   const[startPeriod,setStartPeriod]=useState(pk(now.getFullYear(),now.getMonth()));
   const saveTimer=useRef(null);
+  const stateRef=useRef({});
+  const writingRef=useRef(false);
+  stateRef.current={people,advances,bills,startPeriod,shareHistory,settlements};
 
   // Firebase realtime listener
   useEffect(()=>{
     const unsub=DOC.onSnapshot(snap=>{
+      // Neaplikuj remote snapshot uprostřed vlastního zápisu (ochrana proti race)
+      if(writingRef.current)return;
       if(snap.exists){
         const d=snap.data();
         if(d.people)setPeople(d.people);
-        if(d.advances)setAdvances(d.advances);
-        if(d.bills)setBills(d.bills);
+        if(Array.isArray(d.advances))setAdvances(d.advances);
+        if(Array.isArray(d.bills))setBills(d.bills);
         if(d.startPeriod)setStartPeriod(d.startPeriod);
-        if(d.shareHistory)setShareHistory(d.shareHistory);
-        if(d.settlements)setSettlements(d.settlements);
+        if(Array.isArray(d.shareHistory))setShareHistory(d.shareHistory);
+        if(Array.isArray(d.settlements))setSettlements(d.settlements);
       }
       setLoaded(true);
       setSyncStatus("ok");
     },err=>{
       console.error("Firestore listen error:",err);
       setSyncStatus("error");
-      // Fallback to localStorage
       try{
         const local=JSON.parse(localStorage.getItem("energie-backup")||"null");
         if(local){
           if(local.people)setPeople(local.people);
-          if(local.advances)setAdvances(local.advances);
-          if(local.bills)setBills(local.bills);
+          if(Array.isArray(local.advances))setAdvances(local.advances);
+          if(Array.isArray(local.bills))setBills(local.bills);
           if(local.startPeriod)setStartPeriod(local.startPeriod);
-          if(local.shareHistory)setShareHistory(local.shareHistory);
-          if(local.settlements)setSettlements(local.settlements);
+          if(Array.isArray(local.shareHistory))setShareHistory(local.shareHistory);
+          if(Array.isArray(local.settlements))setSettlements(local.settlements);
         }
       }catch(e){}
       setLoaded(true);
@@ -1100,30 +1216,39 @@ function App(){
     return()=>unsub();
   },[]);
 
-  // Debounced save to Firebase
-  const saveToFirebase=useCallback((data)=>{
+  // Ukládej JEN změněná pole — nikdy nepřepisuj celý dokument stale/prázdnými poli
+  const saveToFirebase=useCallback((patch)=>{
     if(saveTimer.current)clearTimeout(saveTimer.current);
     saveTimer.current=setTimeout(()=>{
+      const full={...stateRef.current,...patch};
+      // Ochrana: nikdy neposílej prázdné advances/bills/people, pokud ve state už něco je
+      const safePatch={...patch};
+      if(Array.isArray(safePatch.advances)&&safePatch.advances.length===0&&(stateRef.current.advances||[]).length>0){
+        console.warn("Blocked save of empty advances");
+        delete safePatch.advances;
+      }
+      if(Object.keys(safePatch).length===0)return;
+      writingRef.current=true;
       setSyncStatus("loading");
-      DOC.set(data,{merge:true}).then(()=>{
+      DOC.set(safePatch,{merge:true}).then(()=>{
         setSyncStatus("ok");
-        localStorage.setItem("energie-backup",JSON.stringify(data));
+        localStorage.setItem("energie-backup",JSON.stringify({...stateRef.current,...safePatch}));
+        setTimeout(()=>{writingRef.current=false},800);
       }).catch(err=>{
         console.error("Save error:",err);
         setSyncStatus("error");
-        localStorage.setItem("energie-backup",JSON.stringify(data));
+        writingRef.current=false;
+        localStorage.setItem("energie-backup",JSON.stringify(stateRef.current));
       });
     },500);
   },[]);
 
-  // Wrapped setters that auto-save
-  const payload=(extra={})=>({people,advances,bills,startPeriod,shareHistory,settlements,...extra});
-  const sp=useCallback(v=>{const n=typeof v==="function"?v(people):v;setPeople(n);if(loaded)saveToFirebase(payload({people:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
-  const sa=useCallback(v=>{const n=typeof v==="function"?v(advances):v;setAdvances(n);if(loaded)saveToFirebase(payload({advances:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
-  const sb=useCallback(v=>{const n=typeof v==="function"?v(bills):v;setBills(n);if(loaded)saveToFirebase(payload({bills:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
-  const ssp=useCallback(v=>{setStartPeriod(v);if(loaded)saveToFirebase(payload({startPeriod:v}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
-  const ssh=useCallback(v=>{const n=typeof v==="function"?v(shareHistory):v;setShareHistory(n);if(loaded)saveToFirebase(payload({shareHistory:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
-  const sst=useCallback(v=>{const n=typeof v==="function"?v(settlements):v;setSettlements(n);if(loaded)saveToFirebase(payload({settlements:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const sp=useCallback(v=>{const n=typeof v==="function"?v(stateRef.current.people):v;setPeople(n);stateRef.current={...stateRef.current,people:n};if(loaded)saveToFirebase({people:n})},[loaded,saveToFirebase]);
+  const sa=useCallback(v=>{const n=typeof v==="function"?v(stateRef.current.advances):v;setAdvances(n);stateRef.current={...stateRef.current,advances:n};if(loaded)saveToFirebase({advances:n})},[loaded,saveToFirebase]);
+  const sb=useCallback(v=>{const n=typeof v==="function"?v(stateRef.current.bills):v;setBills(n);stateRef.current={...stateRef.current,bills:n};if(loaded)saveToFirebase({bills:n})},[loaded,saveToFirebase]);
+  const ssp=useCallback(v=>{setStartPeriod(v);stateRef.current={...stateRef.current,startPeriod:v};if(loaded)saveToFirebase({startPeriod:v})},[loaded,saveToFirebase]);
+  const ssh=useCallback(v=>{const n=typeof v==="function"?v(stateRef.current.shareHistory):v;setShareHistory(n);stateRef.current={...stateRef.current,shareHistory:n};if(loaded)saveToFirebase({shareHistory:n})},[loaded,saveToFirebase]);
+  const sst=useCallback(v=>{const n=typeof v==="function"?v(stateRef.current.settlements):v;setSettlements(n);stateRef.current={...stateRef.current,settlements:n};if(loaded)saveToFirebase({settlements:n})},[loaded,saveToFirebase]);
 
   const selectUser=(id)=>{setUser(id);localStorage.setItem("energie-user",id)};
   const logout=()=>{setUser(null);localStorage.removeItem("energie-user")};
