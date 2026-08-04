@@ -98,6 +98,36 @@ const periodOfDate=d=>(d||"").slice(0,7);
 const fDate=d=>{if(!d)return"";const[y,m,day]=d.split("-");return`${parseInt(day,10)}.${parseInt(m,10)}.${y}`};
 const lastDayOfMonth=(y,m)=>{const mm=String(m).padStart(2,"0");const last=new Date(y,m,0).getDate();return`${y}-${mm}-${String(last).padStart(2,"0")}`};
 
+/** Výpočet vyúčtování: zálohy započítané max do výše očekávaných */
+const computeSettlement=(people,advances,bills,shareHistory,startPeriod,cutoff)=>{
+  const cutoffPeriod=periodOfDate(cutoff);
+  const periods=cutoffPeriod>=startPeriod?allP(startPeriod,cutoffPeriod):[];
+  const billsIn=bills.filter(b=>b.period<=cutoffPeriod&&b.period>=startPeriod);
+  const allZalohy=advances.filter(isZaloha);
+  // nedoplatky bez vazby na uzavřené vyúčtování (ty už jsou „spotřebované“)
+  const allNedo=advances.filter(a=>isNedo(a)&&!a.settlementId);
+  const rm=people.filter(p=>!p.isOwner);
+  const rows=rm.map(p=>{
+    const expected=periods.reduce((s,pd)=>s+getAdv(p,pd),0);
+    const zalohyRaw=allZalohy.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
+    const zalohyCounted=Math.min(zalohyRaw,expected);
+    const nedo=allNedo.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
+    const share=personShareOfBills(billsIn,p.id,shareHistory,people);
+    const credited=zalohyCounted+nedo;
+    const bal=credited-share;
+    return{...p,expected,zalohyRaw,zalohyCounted,nedo,share,credited,bal,owed:Math.max(0,-bal),credit:Math.max(0,bal)};
+  });
+  return{cutoffPeriod,periods,billsIn,rows,totalBills:billsIn.reduce((s,b)=>s+b.amount,0)};
+};
+const settlementPaid=(advances,settlementId,personId)=>
+  advances.filter(a=>isNedo(a)&&a.settlementId===settlementId&&a.personId===personId).reduce((s,a)=>s+a.amount,0);
+const settlementRemaining=(settlement,advances,personId)=>{
+  if(!settlement||!settlement.people)return 0;
+  const row=settlement.people.find(p=>p.personId===personId);
+  if(!row)return 0;
+  return Math.max(0,(row.owed||0)-settlementPaid(advances,settlement.id,personId));
+};
+
 // ─── Styles ───
 const cs={background:"var(--card)",borderRadius:12,border:"1px solid var(--border)"};
 const bs={padding:"10px 18px",borderRadius:10,border:"none",background:"var(--accent)",color:"#fff",fontWeight:600,fontSize:14,cursor:"pointer"};
@@ -133,9 +163,10 @@ function Login({people,onSelect}){
 }
 
 // ═══ ROOMMATE ═══
-function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod,currentPeriod,onLogout}){
+function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod,currentPeriod,settlements=[],onLogout}){
   const[tab,setTab]=useState("overview");
   const[payKind,setPayKind]=useState("zaloha");
+  const[settleId,setSettleId]=useState("");
   const[amount,setAmount]=useState(String(getAdv(me,currentPeriod)));
   const[note,setNote]=useState("");
   const now=new Date();
@@ -153,15 +184,20 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
   const myNedoplatky=myPayments.filter(isNedo);
   const zalohyPaid=myZalohy.reduce((s,a)=>s+a.amount,0);
   const nedoPaid=myNedoplatky.reduce((s,a)=>s+a.amount,0);
-  const totalPaid=zalohyPaid+nedoPaid;
   const advDebt=totalExp-zalohyPaid;
-  const totalBills=bills.reduce((s,b)=>s+b.amount,0);
-  const myShare=personShareOfBills(bills,me.id,shareHistory,people);
-  const realBal=totalPaid-myShare;
   const myRatio=fmtRatio(shareHistory,me.id,vp,people);
 
+  const mySettlements=[...settlements].sort((a,b)=>b.cutoff.localeCompare(a.cutoff)).map(s=>{
+    const row=s.people.find(p=>p.personId===me.id);
+    if(!row)return null;
+    const rem=settlementRemaining(s,advances,me.id);
+    const paid=settlementPaid(advances,s.id,me.id);
+    return{...s,row,rem,paid};
+  }).filter(Boolean);
+  const openSettlements=mySettlements.filter(s=>s.rem>0);
+  const totalSettleDebt=openSettlements.reduce((s,x)=>s+x.rem,0);
+
   const pZalohy=myZalohy.filter(a=>a.period===vp);
-  const pNedoplatky=myNedoplatky.filter(a=>a.period===vp);
   const pPayments=myPayments.filter(a=>a.period===vp);
   const pPaidZ=pZalohy.reduce((s,a)=>s+a.amount,0);
   const pExp=periods.includes(vp)?myAdv:0;
@@ -170,14 +206,29 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
   const pPP=personShareOfAmount(pBT,me.id,vp,shareHistory,people);
 
   useEffect(()=>{
-    if(payKind==="zaloha")setAmount(String(getAdv(me,vp)));
-    else if(realBal<0)setAmount(String(Math.round(Math.abs(realBal))));
-    else setAmount("");
+    if(payKind==="zaloha"){setSettleId("");setAmount(String(getAdv(me,vp)));}
+    else{
+      const first=openSettlements[0];
+      const sid=settleId&&openSettlements.some(s=>s.id===settleId)?settleId:(first?first.id:"");
+      setSettleId(sid);
+      const rem=sid?settlementRemaining(settlements.find(s=>s.id===sid),advances,me.id):0;
+      setAmount(rem>0?String(Math.round(rem)):"");
+    }
   },[payKind,vp]);
+
+  useEffect(()=>{
+    if(payKind==="nedoplatek"&&settleId){
+      const rem=settlementRemaining(settlements.find(s=>s.id===settleId),advances,me.id);
+      if(rem>0)setAmount(String(Math.round(rem)));
+    }
+  },[settleId]);
 
   const add=()=>{
     if(!amount||parseFloat(amount)<=0)return;
-    setAdvances([...advances,{id:gid(),personId:me.id,amount:parseFloat(amount),note,period:vp,date:new Date().toISOString().slice(0,10),kind:payKind}]);
+    if(payKind==="nedoplatek"&&!settleId&&openSettlements.length>0)return;
+    const entry={id:gid(),personId:me.id,amount:parseFloat(amount),note,period:vp,date:new Date().toISOString().slice(0,10),kind:payKind};
+    if(payKind==="nedoplatek"&&settleId)entry.settlementId=settleId;
+    setAdvances([...advances,entry]);
     setNote("");
   };
 
@@ -209,6 +260,28 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
 
     <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 100px"}}>
       {tab==="overview"&&<div>
+        {totalSettleDebt>0&&<div style={{background:"linear-gradient(135deg,#c2410c,#ea580c)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
+          <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>NEDOPLATEK Z VYÚČTOVÁNÍ</div>
+          <div style={{fontSize:30,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{fCZK(totalSettleDebt)}</div>
+          <div style={{fontSize:13,opacity:.8,marginTop:4}}>Uhraď jako typ „Nedoplatek“ v záložce Zaplatit</div>
+        </div>}
+
+        {mySettlements.length>0&&<div style={{marginBottom:16}}>
+          <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>Uzavřená vyúčtování</h3>
+          {mySettlements.map(s=><div key={s.id} style={{...cs,padding:"14px 16px",marginBottom:8,borderLeft:`4px solid ${s.rem>0?"var(--red)":"var(--green)"}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontWeight:700}}>k {fDate(s.cutoff)}</span>
+              <span style={{fontWeight:700,color:s.rem>0?"var(--red)":"var(--green)"}}>{s.rem>0?`zbývá ${fCZK(s.rem)}`:s.row.owed>0?"uhrazeno ✓":s.row.credit>0?`přeplatek ${fCZK(s.row.credit)}`:"vyrovnáno ✓"}</span>
+            </div>
+            <div style={{fontSize:12,color:"var(--text-dim)",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"2px 8px"}}>
+              <span>Podíl na nákladech</span><span style={{textAlign:"right",fontWeight:600,color:"var(--text)"}}>{fCZK(s.row.share)}</span>
+              <span>Započtené zálohy</span><span style={{textAlign:"right"}}>{fCZK(s.row.zalohyCounted)}</span>
+              {s.row.owed>0&&<><span>Nedoplatek při uzavření</span><span style={{textAlign:"right"}}>{fCZK(s.row.owed)}</span></>}
+              {s.paid>0&&<><span>Už splaceno</span><span style={{textAlign:"right",color:"var(--green)"}}>{fCZK(s.paid)}</span></>}
+            </div>
+          </div>)}
+        </div>}
+
         {advDebt>0?<div style={{background:"linear-gradient(135deg,#dc2626,#ef4444)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
           <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>DLUŽNÉ ZÁLOHY</div>
           <div style={{fontSize:30,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{fCZK(advDebt)}</div>
@@ -216,13 +289,7 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
         </div>:<div style={{background:"linear-gradient(135deg,#16a34a,#22c55e)",borderRadius:14,padding:"20px 18px",marginBottom:12,color:"#fff"}}>
           <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>ZÁLOHY</div>
           <div style={{fontSize:22,fontWeight:700}}>Vše zaplaceno ✓</div>
-          {zalohyPaid>totalExp&&<div style={{fontSize:13,opacity:.8,marginTop:4}}>Přeplatek záloh: {fCZK(zalohyPaid-totalExp)}</div>}
-        </div>}
-
-        {totalBills>0&&<div style={{background:realBal>=0?"linear-gradient(135deg,#0d9488,#14b8a6)":"linear-gradient(135deg,#c2410c,#ea580c)",borderRadius:14,padding:"16px 18px",marginBottom:16,color:"#fff"}}>
-          <div style={{fontSize:12,fontWeight:600,opacity:.85,marginBottom:4}}>SKUTEČNÉ VYÚČTOVÁNÍ</div>
-          <div style={{fontSize:24,fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{realBal>=0?`přeplatek ${fCZK(realBal)}`:`nedoplatek ${fCZK(Math.abs(realBal))}`}</div>
-          <div style={{fontSize:12,opacity:.8,marginTop:4}}>Podíl ({myRatio}): {fCZK(myShare)} · Zálohy+nedoplatky: {fCZK(totalPaid)}</div>
+          {zalohyPaid>totalExp&&<div style={{fontSize:13,opacity:.8,marginTop:4}}>Navíc zaplaceno: {fCZK(zalohyPaid-totalExp)} (do vyúčtování max. očekávané)</div>}
         </div>}
 
         <div style={{marginBottom:16}}>
@@ -231,11 +298,6 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
             <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Zaplaceno na zálohách</span><span style={{fontWeight:700,color:"var(--green)"}}>{fCZK(zalohyPaid)}</span></div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Zaplaceno na nedoplatcích</span><span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(nedoPaid)}</span></div>
             <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Očekávané zálohy</span><span style={{fontWeight:600,color:"var(--accent)"}}>{fCZK(totalExp)}</span></div>
-            <div style={{borderTop:"1px solid var(--border)",margin:"6px 0"}} />
-            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Faktury celkem</span><span style={{fontWeight:600,color:"var(--orange)"}}>{fCZK(totalBills)}</span></div>
-            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Tvůj podíl ({myRatio})</span><span style={{fontWeight:600,color:"var(--orange)"}}>{fCZK(myShare)}</span></div>
-            <div style={{borderTop:"1px solid var(--border)",margin:"6px 0"}} />
-            <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0"}}><span style={{fontWeight:600}}>Bilance (platby − podíl)</span><span style={{fontWeight:700,color:realBal>=0?"var(--green)":"var(--red)"}}>{realBal>=0?`přeplatek ${fCZK(realBal)}`:`nedoplatek ${fCZK(Math.abs(realBal))}`}</span></div>
           </div>
         </div>
 
@@ -255,7 +317,7 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
             </div>)}
             <div style={{...cs,padding:"12px 16px",background:"var(--input-bg)"}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:600,fontSize:13}}>Celkem</span><span style={{fontWeight:700,color:"var(--orange)"}}>{fCZK(pBT)}</span></div>
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Tvůj podíl ({fmtRatio(shareHistory,me.id,vp,people)})</span><span style={{fontWeight:700,color:"var(--accent)"}}>{fCZK(pPP)}</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:"var(--text-dim)"}}>Tvůj podíl ({myRatio})</span><span style={{fontWeight:700,color:"var(--accent)"}}>{fCZK(pPP)}</span></div>
             </div>
           </div>
         </div>:<div style={{...cs,padding:"20px 16px",textAlign:"center",marginBottom:16}}><span style={{color:"var(--text-dim)",fontSize:14}}>Žádné faktury za {pl(vp)}</span></div>}
@@ -278,10 +340,10 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
           <SC label="Záloha měsíc" value={fCZK(pExp)} color="var(--accent)" />
           <SC label="Zálohy zaplaceno" value={fCZK(pPaidZ)} color={pPaidZ>=pExp&&pExp>0?"var(--green)":"var(--orange)"} />
         </div>
-        {realBal<0&&<div style={{...cs,padding:"12px 14px",marginBottom:12,borderLeft:"4px solid var(--orange)"}}>
-          <div style={{fontSize:12,fontWeight:600,color:"var(--orange)",marginBottom:2}}>Nedoplatek z vyúčtování</div>
-          <div style={{fontSize:15,fontWeight:700}}>{fCZK(Math.abs(realBal))}</div>
-          <div style={{fontSize:12,color:"var(--text-dim)",marginTop:2}}>Zadej typ „Nedoplatek“, ať se to nepočítá do záloh</div>
+        {totalSettleDebt>0&&<div style={{...cs,padding:"12px 14px",marginBottom:12,borderLeft:"4px solid var(--orange)"}}>
+          <div style={{fontSize:12,fontWeight:600,color:"var(--orange)",marginBottom:2}}>Otevřené nedoplatky z vyúčtování</div>
+          <div style={{fontSize:15,fontWeight:700}}>{fCZK(totalSettleDebt)}</div>
+          <div style={{fontSize:12,color:"var(--text-dim)",marginTop:2}}>Zvol typ „Nedoplatek“ a konkrétní vyúčtování</div>
         </div>}
         <div style={{...cs,padding:16,marginBottom:20}}>
           <div style={{marginBottom:10}}>
@@ -291,6 +353,13 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
               <button type="button" onClick={()=>setPayKind("nedoplatek")} style={{...bsm,padding:"10px 12px",fontWeight:600,borderColor:payKind==="nedoplatek"?"var(--orange)":"var(--border)",background:payKind==="nedoplatek"?"#fff7ed":"transparent",color:payKind==="nedoplatek"?"var(--orange)":"var(--text-dim)"}}>Nedoplatek</button>
             </div>
           </div>
+          {payKind==="nedoplatek"&&openSettlements.length>0&&<div style={{marginBottom:10}}>
+            <label style={ls}>Vyúčtování</label>
+            <select value={settleId} onChange={e=>setSettleId(e.target.value)} style={is}>
+              {openSettlements.map(s=><option key={s.id} value={s.id}>k {fDate(s.cutoff)} — zbývá {fCZK(s.rem)}</option>)}
+            </select>
+          </div>}
+          {payKind==="nedoplatek"&&openSettlements.length===0&&<p style={{fontSize:13,color:"var(--text-dim)",marginBottom:10}}>Žádný otevřený nedoplatek z uzavřeného vyúčtování.</p>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
             <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} style={is} /></div>
             <div><label style={ls}>Poznámka</label><input value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="VS, datum..." style={is} /></div>
@@ -314,22 +383,15 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
       {tab==="history"&&<div>
         <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:600}}>Historie</h2>
         <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Všechny platby a faktury</p>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:20}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:20}}>
           <SC label="Zálohy" value={fCZK(zalohyPaid)} color="var(--green)" />
-          <SC label="Podíl energií" value={fCZK(myShare)} color="var(--orange)" sub={myRatio} />
-          <SC label={realBal>=0?"Přeplatek":"Nedoplatek"} value={fCZK(Math.abs(realBal))} color={realBal>=0?"var(--green)":"var(--red)"} />
+          <SC label="Nedoplatky" value={fCZK(nedoPaid)} color="var(--orange)" />
         </div>
         {spk.length===0?<div style={{...cs,padding:"32px 16px",textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>📭</div><p style={{color:"var(--text-dim)"}}>Zatím žádné záznamy</p></div>
         :spk.map(k=>{
           const items=hbp[k];
-          const myP=items.filter(i=>i.type==="adv").reduce((s,i)=>s+i.amount,0);
-          const bP=items.filter(i=>i.type==="bill").reduce((s,i)=>s+i.amount,0);
-          const sP=personShareOfAmount(bP,me.id,k,shareHistory,people);
           return <div key={k} style={{marginBottom:20}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <h3 style={{fontSize:15,fontWeight:700}}>{pl(k)}</h3>
-              {bP>0&&<span style={{fontSize:12,color:myP>=sP?"var(--green)":"var(--red)",fontWeight:600}}>{myP>=sP?`+${fCZK(myP-sP)}`:fCZK(myP-sP)}</span>}
-            </div>
+            <h3 style={{fontSize:15,fontWeight:700,marginBottom:8}}>{pl(k)}</h3>
             <div style={{display:"flex",flexDirection:"column",gap:4}}>
               {items.map(item=><div key={item.id} style={{...cs,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
                 {item.type==="adv"?<>
@@ -357,7 +419,7 @@ function Roommate({me,people,advances,setAdvances,bills,shareHistory,startPeriod
 }
 
 // ═══ OWNER COMPONENTS ═══
-function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod}){
+function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod,settlements=[]}){
   const rm=people.filter(p=>!p.isOwner);
   const periods=allP(startPeriod,currentPeriod);
   const pB=bills.filter(b=>b.period===currentPeriod);
@@ -452,46 +514,56 @@ function ODash({people,advances,bills,shareHistory,startPeriod,currentPeriod}){
   </div>;
 }
 
-function OSettle({people,advances,bills,shareHistory,startPeriod}){
-  const rm=people.filter(p=>!p.isOwner);
+function OSettle({people,advances,setAdvances,bills,shareHistory,startPeriod,settlements,setSettlements}){
   const[cutoff,setCutoff]=useState(()=>{
     const n=new Date();
     return lastDayOfMonth(n.getFullYear(),n.getMonth()+1);
   });
-  const cutoffPeriod=periodOfDate(cutoff);
-  const periods=cutoffPeriod>=startPeriod?allP(startPeriod,cutoffPeriod):[];
+  const computed=computeSettlement(people,advances,bills,shareHistory,startPeriod,cutoff);
+  const{cutoffPeriod,periods,billsIn,rows,totalBills}=computed;
 
-  // Náklady: faktury za měsíce do cutoffPeriod včetně
-  const billsIn=bills.filter(b=>b.period<=cutoffPeriod&&b.period>=startPeriod);
-  // Zálohy/nedoplatky: VŠECHNY kdykoli zaplacené (i pozdější splátky dluhu z 07/08)
-  const allZalohy=advances.filter(isZaloha);
-  const allNedo=advances.filter(isNedo);
-
-  const totalBills=billsIn.reduce((s,b)=>s+b.amount,0);
-  const totalZ=allZalohy.reduce((s,a)=>s+a.amount,0);
-  const totalN=allNedo.reduce((s,a)=>s+a.amount,0);
-
-  const rows=rm.map(p=>{
-    const expected=periods.reduce((s,pd)=>s+getAdv(p,pd),0);
-    const zalohy=allZalohy.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
-    const nedo=allNedo.filter(a=>a.personId===p.id).reduce((s,a)=>s+a.amount,0);
-    const paid=zalohy+nedo;
-    const share=personShareOfBills(billsIn,p.id,shareHistory,people);
-    const advDebt=expected-zalohy;
-    const bal=paid-share;
-    return{...p,expected,zalohy,nedo,paid,share,advDebt,bal};
-  });
-
-  // Rozpis nákladů podle měsíců
   const byPeriod={};
   billsIn.forEach(b=>{if(!byPeriod[b.period])byPeriod[b.period]={total:0,items:[]};byPeriod[b.period].total+=b.amount;byPeriod[b.period].items.push(b)});
   const periodKeys=Object.keys(byPeriod).sort();
-
   const setQuickMonth=(y,m)=>{setCutoff(lastDayOfMonth(y,m))};
+
+  const alreadyClosed=settlements.some(s=>s.cutoff===cutoff);
+  const closeSettlement=()=>{
+    if(periods.length===0)return;
+    if(alreadyClosed&&!confirm(`Vyúčtování k ${fDate(cutoff)} už existuje. Vytvořit znovu?`))return;
+    if(!confirm(`Uzavřít vyúčtování k ${fDate(cutoff)}?\nSpolubydlící uvidí výsledek a případné nedoplatky.`))return;
+    const entry={
+      id:gid(),
+      cutoff,
+      cutoffPeriod,
+      startPeriod,
+      createdAt:new Date().toISOString().slice(0,10),
+      totalBills,
+      people:rows.map(r=>({
+        personId:r.id,
+        name:r.name,
+        expected:r.expected,
+        zalohyRaw:r.zalohyRaw,
+        zalohyCounted:r.zalohyCounted,
+        nedoAtClose:r.nedo,
+        share:r.share,
+        owed:r.owed,
+        credit:r.credit,
+      })),
+    };
+    const next=alreadyClosed?settlements.filter(s=>s.cutoff!==cutoff):settlements;
+    setSettlements([entry,...next]);
+  };
+  const delSettlement=id=>{
+    if(!confirm("Smazat toto uzavřené vyúčtování?"))return;
+    setSettlements(settlements.filter(s=>s.id!==id));
+  };
+
+  const sortedSettlements=[...settlements].sort((a,b)=>b.cutoff.localeCompare(a.cutoff));
 
   return <div>
     <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:600}}>Vyúčtování k datu</h2>
-    <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Náklady a očekávané zálohy do zvoleného data; zaplacené zálohy = vše, co kdy poslali (i později).</p>
+    <p style={{fontSize:13,color:"var(--text-dim)",marginBottom:16}}>Náhled spočítá bilanci; tlačítkem <strong>Uzavřít vyúčtování</strong> ho zveřejníš spolubydlícím.</p>
 
     <div style={{...cs,padding:16,marginBottom:16}}>
       <label style={ls}>Vyúčtovat k datu</label>
@@ -506,33 +578,36 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
         })}
       </div>
       <p style={{fontSize:12,color:"var(--text-dim)",marginTop:10}}>
-        Období nákladů/oček. záloh: <strong style={{color:"var(--text)"}}>{pl(startPeriod)}</strong> → <strong style={{color:"var(--text)"}}>{pl(cutoffPeriod)}</strong> ({periods.length} měs.)
+        Období: <strong style={{color:"var(--text)"}}>{pl(startPeriod)}</strong> → <strong style={{color:"var(--text)"}}>{pl(cutoffPeriod)}</strong> ({periods.length} měs.)
       </p>
     </div>
 
     {periods.length===0?<div style={{...cs,padding:20,textAlign:"center",color:"var(--text-dim)"}}>Datum je před začátkem sledování</div>:<>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16}}>
         <SC label="Náklady do data" value={fCZK(totalBills)} color="var(--orange)" sub={`${billsIn.length} faktur`} />
-        <SC label="Zálohy celkem (kdykoli)" value={fCZK(totalZ)} color="var(--green)" sub={totalN>0?`+ nedoplatky ${fCZK(totalN)}`:undefined} />
+        <SC label="Oček. zálohy celkem" value={fCZK(rows.reduce((s,r)=>s+r.expected,0))} color="var(--accent)" />
       </div>
 
-      <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Výsledek k {fDate(cutoff)}</h3>
-      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+      <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Náhled k {fDate(cutoff)}</h3>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
         {rows.map(r=><div key={r.id} style={{...cs,padding:"14px 16px",borderLeft:`4px solid ${r.bal>=0?"var(--green)":"var(--red)"}`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <span style={{fontWeight:700,fontSize:15}}>{r.name}</span>
-            <span style={{fontWeight:700,fontSize:16,color:r.bal>=0?"var(--green)":"var(--red)"}}>{r.bal>=0?`přeplatek ${fCZK(r.bal)}`:`nedoplatek ${fCZK(Math.abs(r.bal))}`}</span>
+            <span style={{fontWeight:700,fontSize:16,color:r.bal>=0?"var(--green)":"var(--red)"}}>{r.bal>=0?`přeplatek ${fCZK(r.bal)}`:`nedoplatek ${fCZK(r.owed)}`}</span>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 12px",fontSize:12,color:"var(--text-dim)"}}>
-            <span>Očekávané zálohy (do {pl(cutoffPeriod)})</span><span style={{textAlign:"right",fontWeight:600,color:"var(--text)"}}>{fCZK(r.expected)}</span>
-            <span>Zaplacené zálohy (všechny)</span><span style={{textAlign:"right",fontWeight:600,color:"var(--green)"}}>{fCZK(r.zalohy)}</span>
-            {r.nedo>0&&<><span>Zaplacené nedoplatky</span><span style={{textAlign:"right",fontWeight:600,color:"var(--orange)"}}>{fCZK(r.nedo)}</span></>}
-            <span>Dluh na zálohách</span><span style={{textAlign:"right",fontWeight:600,color:r.advDebt>0?"var(--red)":"var(--green)"}}>{r.advDebt>0?fCZK(r.advDebt):(r.advDebt<0?`přeplatek ${fCZK(Math.abs(r.advDebt))}`:"0 ✓")}</span>
+            <span>Očekávané zálohy</span><span style={{textAlign:"right",fontWeight:600,color:"var(--text)"}}>{fCZK(r.expected)}</span>
+            <span>Zaplacené zálohy</span><span style={{textAlign:"right",fontWeight:600,color:"var(--green)"}}>{fCZK(r.zalohyRaw)}{r.zalohyRaw>r.expected?<span style={{color:"var(--text-dim)"}}> → započteno {fCZK(r.zalohyCounted)}</span>:null}</span>
+            {r.nedo>0&&<><span>Nedoplatky (zatím)</span><span style={{textAlign:"right",fontWeight:600,color:"var(--orange)"}}>{fCZK(r.nedo)}</span></>}
             <span style={{borderTop:"1px solid var(--border)",paddingTop:4,marginTop:2}}>Podíl na nákladech</span><span style={{borderTop:"1px solid var(--border)",paddingTop:4,marginTop:2,textAlign:"right",fontWeight:700,color:"var(--orange)"}}>{fCZK(r.share)}</span>
-            <span>Platby celkem</span><span style={{textAlign:"right",fontWeight:600}}>{fCZK(r.paid)}</span>
+            <span>Započtené platby</span><span style={{textAlign:"right",fontWeight:600}}>{fCZK(r.credited)}</span>
           </div>
         </div>)}
       </div>
+
+      <button onClick={closeSettlement} style={{...bs,width:"100%",marginBottom:20,padding:"14px 18px",fontSize:15,background:alreadyClosed?"var(--orange)":"var(--accent)"}}>
+        {alreadyClosed?`↻ Znovu uzavřít k ${fDate(cutoff)}`:`✓ Uzavřít vyúčtování k ${fDate(cutoff)}`}
+      </button>
 
       {periodKeys.length>0&&<div style={{marginBottom:16}}>
         <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Náklady po měsících</h3>
@@ -551,36 +626,83 @@ function OSettle({people,advances,bills,shareHistory,startPeriod}){
         })}
       </div>}
 
-      <div style={{...cs,padding:"12px 14px",background:"var(--input-bg)"}}>
+      <div style={{...cs,padding:"12px 14px",background:"var(--input-bg)",marginBottom:20}}>
         <div style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:6}}>Jak se počítá</div>
         <ul style={{margin:0,paddingLeft:18,fontSize:12,color:"var(--text-dim)",lineHeight:1.55}}>
-          <li>Očekávané zálohy = součet měsíčních záloh od {pl(startPeriod)} do {pl(cutoffPeriod)}</li>
-          <li>Zaplacené zálohy = <strong>všechny</strong> zálohy, které kdy poslali (i když dluh z 06 splatili v 07/08)</li>
-          <li>Nedoplatky = všechny zaznamenané platby typu nedoplatek</li>
-          <li>Náklady = faktury za měsíce ≤ {pl(cutoffPeriod)}, podíl podle poměru daného měsíce</li>
-          <li>Bilance = (zálohy + nedoplatky) − podíl na nákladech</li>
+          <li>Očekávané zálohy = součet od {pl(startPeriod)} do {pl(cutoffPeriod)}</li>
+          <li>Zaplacené zálohy = všechny kdykoli (i pozdní splátky), ale <strong>max do výše očekávaných</strong></li>
+          <li>Náklady = faktury ≤ {pl(cutoffPeriod)}</li>
+          <li>Bilance = (započtené zálohy + nedoplatky) − podíl na nákladech</li>
         </ul>
       </div>
     </>}
+
+    {sortedSettlements.length>0&&<div>
+      <h3 style={{fontSize:12,fontWeight:600,color:"var(--text-dim)",marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>Uzavřená vyúčtování</h3>
+      {sortedSettlements.map(s=>{
+        const openDebt=s.people.reduce((sum,p)=>sum+settlementRemaining(s,advances,p.personId),0);
+        return <div key={s.id} style={{...cs,padding:"14px 16px",marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div>
+              <div style={{fontWeight:700}}>k {fDate(s.cutoff)}</div>
+              <div style={{fontSize:12,color:"var(--text-dim)"}}>uzavřeno {fDate(s.createdAt)} · {pl(s.startPeriod)} → {pl(s.cutoffPeriod)}</div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:12,fontWeight:700,color:openDebt>0?"var(--red)":"var(--green)"}}>{openDebt>0?`dluží ${fCZK(openDebt)}`:"uhrazeno ✓"}</span>
+              <button onClick={()=>delSettlement(s.id)} style={bsd}>✕</button>
+            </div>
+          </div>
+          {s.people.map(p=>{
+            const rem=settlementRemaining(s,advances,p.personId);
+            const paid=settlementPaid(advances,s.id,p.personId);
+            return <div key={p.personId} style={{display:"flex",justifyContent:"space-between",fontSize:13,padding:"3px 0"}}>
+              <span>{p.name}{paid>0&&<span style={{color:"var(--text-dim)",fontSize:11,marginLeft:6}}>splaceno {fCZK(paid)}</span>}</span>
+              <span style={{fontWeight:600,color:rem>0?"var(--red)":p.credit>0?"var(--green)":"var(--text-dim)"}}>
+                {rem>0?`zbývá ${fCZK(rem)}`:p.owed>0?"uhrazeno ✓":p.credit>0?`přeplatek ${fCZK(p.credit)}`:"vyrovnáno"}
+              </span>
+            </div>;
+          })}
+        </div>;
+      })}
+    </div>}
   </div>;
 }
 
-function OAdv({people,advances,setAdvances,currentPeriod}){
+function OAdv({people,advances,setAdvances,currentPeriod,settlements=[]}){
   const rm=people.filter(p=>!p.isOwner);
   const[pid,setPid]=useState("");
   const selPerson=rm.find(p=>p.id===pid);
   const[amount,setAmount]=useState("");
   const[note,setNote]=useState("");
   const[payKind,setPayKind]=useState("zaloha");
+  const[settleId,setSettleId]=useState("");
   const pA=advances.filter(a=>a.period===currentPeriod);
 
+  const openForPerson=pid?(settlements||[]).filter(s=>settlementRemaining(s,advances,pid)>0).sort((a,b)=>a.cutoff.localeCompare(b.cutoff)):[];
+
   useEffect(()=>{
-    if(selPerson&&payKind==="zaloha")setAmount(String(getAdv(selPerson,currentPeriod)));
+    if(selPerson&&payKind==="zaloha"){setSettleId("");setAmount(String(getAdv(selPerson,currentPeriod)));}
+    else if(payKind==="nedoplatek"&&pid){
+      const first=openForPerson[0];
+      const sid=first?first.id:"";
+      setSettleId(sid);
+      if(sid)setAmount(String(Math.round(settlementRemaining(settlements.find(s=>s.id===sid),advances,pid))));
+      else setAmount("");
+    }
   },[pid,payKind,currentPeriod]);
+
+  useEffect(()=>{
+    if(payKind==="nedoplatek"&&settleId&&pid){
+      setAmount(String(Math.round(settlementRemaining(settlements.find(s=>s.id===settleId),advances,pid))));
+    }
+  },[settleId]);
 
   const add=()=>{
     if(!pid||!amount)return;
-    setAdvances([...advances,{id:gid(),personId:pid,amount:parseFloat(amount),note,period:currentPeriod,date:new Date().toISOString().slice(0,10),kind:payKind}]);
+    if(payKind==="nedoplatek"&&openForPerson.length>0&&!settleId)return;
+    const entry={id:gid(),personId:pid,amount:parseFloat(amount),note,period:currentPeriod,date:new Date().toISOString().slice(0,10),kind:payKind};
+    if(payKind==="nedoplatek"&&settleId)entry.settlementId=settleId;
+    setAdvances([...advances,entry]);
     setAmount(selPerson&&payKind==="zaloha"?String(getAdv(selPerson,currentPeriod)):"");
     setNote("");
   };
@@ -599,6 +721,12 @@ function OAdv({people,advances,setAdvances,currentPeriod}){
         <div><label style={ls}>Od koho</label><select value={pid} onChange={e=>setPid(e.target.value)} style={is}><option value="">Vyber...</option>{rm.map(p=><option key={p.id} value={p.id}>{p.name} ({fCZK(getAdv(p,currentPeriod))})</option>)}</select></div>
         <div><label style={ls}>Částka (Kč)</label><input type="number" value={amount} onChange={e=>setAmount(e.target.value)} style={is}/></div>
       </div>
+      {payKind==="nedoplatek"&&openForPerson.length>0&&<div style={{marginBottom:10}}>
+        <label style={ls}>Vyúčtování</label>
+        <select value={settleId} onChange={e=>setSettleId(e.target.value)} style={is}>
+          {openForPerson.map(s=><option key={s.id} value={s.id}>k {fDate(s.cutoff)} — zbývá {fCZK(settlementRemaining(s,advances,pid))}</option>)}
+        </select>
+      </div>}
       <div style={{marginBottom:10}}><label style={ls}>Poznámka</label><input value={note} onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="VS, pozn..." style={is}/></div>
       <button onClick={add} style={{...bs,width:"100%",background:payKind==="nedoplatek"?"var(--orange)":"var(--accent)"}}>+ Zaznamenat {payKind==="nedoplatek"?"nedoplatek":"zálohu"}</button>
     </div>
@@ -883,7 +1011,7 @@ function OSettings({people,setPeople,startPeriod,setStartPeriod,shareHistory,set
 }
 
 // ═══ OWNER VIEW ═══
-function Owner({people,setPeople,advances,setAdvances,bills,setBills,startPeriod,setStartPeriod,shareHistory,setShareHistory,onLogout}){
+function Owner({people,setPeople,advances,setAdvances,bills,setBills,startPeriod,setStartPeriod,shareHistory,setShareHistory,settlements,setSettlements,onLogout}){
   const[tab,setTab]=useState("dashboard");
   const now=new Date();
   const[sY,setSY]=useState(now.getFullYear());
@@ -905,9 +1033,9 @@ function Owner({people,setPeople,advances,setAdvances,bills,setBills,startPeriod
       </div>
     </div>
     <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 100px"}}>
-      {tab==="dashboard"&&<ODash people={people} advances={advances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} currentPeriod={cp} />}
-      {tab==="settle"&&<OSettle people={people} advances={advances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} />}
-      {tab==="advances"&&<OAdv people={people} advances={advances} setAdvances={setAdvances} currentPeriod={cp} />}
+      {tab==="dashboard"&&<ODash people={people} advances={advances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} currentPeriod={cp} settlements={settlements} />}
+      {tab==="settle"&&<OSettle people={people} advances={advances} setAdvances={setAdvances} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} settlements={settlements} setSettlements={setSettlements} />}
+      {tab==="advances"&&<OAdv people={people} advances={advances} setAdvances={setAdvances} currentPeriod={cp} settlements={settlements} />}
       {tab==="bills"&&<OBills bills={bills} setBills={setBills} currentPeriod={cp} />}
       {tab==="settings"&&<OSettings people={people} setPeople={setPeople} startPeriod={startPeriod} setStartPeriod={setStartPeriod} shareHistory={shareHistory} setShareHistory={setShareHistory} />}
     </div>
@@ -933,6 +1061,7 @@ function App(){
   const[advances,setAdvances]=useState([]);
   const[bills,setBills]=useState([]);
   const[shareHistory,setShareHistory]=useState([]);
+  const[settlements,setSettlements]=useState([]);
   const now=new Date();
   const[startPeriod,setStartPeriod]=useState(pk(now.getFullYear(),now.getMonth()));
   const saveTimer=useRef(null);
@@ -947,6 +1076,7 @@ function App(){
         if(d.bills)setBills(d.bills);
         if(d.startPeriod)setStartPeriod(d.startPeriod);
         if(d.shareHistory)setShareHistory(d.shareHistory);
+        if(d.settlements)setSettlements(d.settlements);
       }
       setLoaded(true);
       setSyncStatus("ok");
@@ -962,6 +1092,7 @@ function App(){
           if(local.bills)setBills(local.bills);
           if(local.startPeriod)setStartPeriod(local.startPeriod);
           if(local.shareHistory)setShareHistory(local.shareHistory);
+          if(local.settlements)setSettlements(local.settlements);
         }
       }catch(e){}
       setLoaded(true);
@@ -986,11 +1117,13 @@ function App(){
   },[]);
 
   // Wrapped setters that auto-save
-  const sp=useCallback(v=>{const n=typeof v==="function"?v(people):v;setPeople(n);if(loaded)saveToFirebase({people:n,advances,bills,startPeriod,shareHistory})},[advances,bills,startPeriod,shareHistory,loaded]);
-  const sa=useCallback(v=>{const n=typeof v==="function"?v(advances):v;setAdvances(n);if(loaded)saveToFirebase({people,advances:n,bills,startPeriod,shareHistory})},[people,bills,startPeriod,shareHistory,loaded]);
-  const sb=useCallback(v=>{const n=typeof v==="function"?v(bills):v;setBills(n);if(loaded)saveToFirebase({people,advances,bills:n,startPeriod,shareHistory})},[people,advances,startPeriod,shareHistory,loaded]);
-  const ssp=useCallback(v=>{setStartPeriod(v);if(loaded)saveToFirebase({people,advances,bills,startPeriod:v,shareHistory})},[people,advances,bills,shareHistory,loaded]);
-  const ssh=useCallback(v=>{const n=typeof v==="function"?v(shareHistory):v;setShareHistory(n);if(loaded)saveToFirebase({people,advances,bills,startPeriod,shareHistory:n})},[people,advances,bills,startPeriod,loaded]);
+  const payload=(extra={})=>({people,advances,bills,startPeriod,shareHistory,settlements,...extra});
+  const sp=useCallback(v=>{const n=typeof v==="function"?v(people):v;setPeople(n);if(loaded)saveToFirebase(payload({people:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const sa=useCallback(v=>{const n=typeof v==="function"?v(advances):v;setAdvances(n);if(loaded)saveToFirebase(payload({advances:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const sb=useCallback(v=>{const n=typeof v==="function"?v(bills):v;setBills(n);if(loaded)saveToFirebase(payload({bills:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const ssp=useCallback(v=>{setStartPeriod(v);if(loaded)saveToFirebase(payload({startPeriod:v}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const ssh=useCallback(v=>{const n=typeof v==="function"?v(shareHistory):v;setShareHistory(n);if(loaded)saveToFirebase(payload({shareHistory:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
+  const sst=useCallback(v=>{const n=typeof v==="function"?v(settlements):v;setSettlements(n);if(loaded)saveToFirebase(payload({settlements:n}))},[people,advances,bills,startPeriod,shareHistory,settlements,loaded]);
 
   const selectUser=(id)=>{setUser(id);localStorage.setItem("energie-user",id)};
   const logout=()=>{setUser(null);localStorage.removeItem("energie-user")};
@@ -1015,8 +1148,8 @@ function App(){
 
   return <div>
     {me.isOwner
-      ?<Owner people={people} setPeople={sp} advances={advances} setAdvances={sa} bills={bills} setBills={sb} startPeriod={startPeriod} setStartPeriod={ssp} shareHistory={shareHistory} setShareHistory={ssh} onLogout={logout} />
-      :<Roommate me={me} people={people} advances={advances} setAdvances={sa} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} currentPeriod={cp} onLogout={logout} />
+      ?<Owner people={people} setPeople={sp} advances={advances} setAdvances={sa} bills={bills} setBills={sb} startPeriod={startPeriod} setStartPeriod={ssp} shareHistory={shareHistory} setShareHistory={ssh} settlements={settlements} setSettlements={sst} onLogout={logout} />
+      :<Roommate me={me} people={people} advances={advances} setAdvances={sa} bills={bills} shareHistory={shareHistory} startPeriod={startPeriod} currentPeriod={cp} settlements={settlements} onLogout={logout} />
     }
     <div style={{position:"fixed",top:12,right:12,fontSize:11,color:"var(--text-dim)",zIndex:999}}>{syncDot}</div>
   </div>;
